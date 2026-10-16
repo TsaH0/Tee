@@ -21,4 +21,6 @@ Any text object that works with `m i` or `m a` also works with `]` and `[`, so f
 
 In Helix mode, some text object keys follow Helix's meanings instead of Vim's: `m i m` and `m a m` select the closest surrounding pair of any kind (brackets, quotes, backticks, or vertical bars), `t` is the type/class text object, `c` is the comment text object, and `x` is the (X)HTML element text object.
 
+Text objects for a specific pair, such as `m i (` or `m a "`, also work when the cursor is not inside that pair: they select the pair enclosing the cursor if there is one, otherwise the next pair on the cursor's line, then the previous pair on that line, then the nearest pair elsewhere. Quotes are paired from the start of the cursor's line and backslash-escaped quotes are skipped, so the closing quote of one string is never paired with the opening quote of the next one.
+
 Like Helix, the closest surrounding pair (`m i m`, `m a m`, `m d m`, `m r m`) is matched using the language's syntax tree, so delimiters inside string literals or comments don't count as pairs. In buffers without a language, no pair is matched.

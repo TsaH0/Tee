@@ -1,12 +1,12 @@
 use std::{cmp::Ordering, ops::Range};
 
 use editor::{
-    DisplayPoint, MultiBufferOffset,
+    DisplayPoint, MultiBufferOffset, MultiBufferSnapshot,
     display_map::{DisplaySnapshot, ToDisplayPoint},
     movement,
 };
 use language::{CharClassifier, CharKind};
-use text::Bias;
+use text::{Bias, Point};
 
 use crate::helix::object::HelixTextObject;
 use crate::object::innermost_surrounding_pair_for_text_object;
@@ -342,6 +342,201 @@ impl HelixTextObject for NearestPair {
     }
 }
 
+/// An explicit pair such as `mi(` or `ma"` that, unlike stock Helix, is still
+/// found when the cursor is not inside it, like Vim's targets.vim:
+/// 1. The innermost pair enclosing the cursor.
+/// 2. A pair on the cursor's line: the nearest one after the cursor, then the
+///    nearest one before it.
+/// 3. The nearest pair anywhere else in the buffer.
+///
+/// Quote-like delimiters (where open == close) are paired left to right from
+/// the start of the cursor's line, skipping backslash-escaped quotes, so the
+/// closing quote of one string is never paired with the opening quote of the
+/// next one, and quotes on other lines don't steal a pair on the cursor's line.
+pub struct ClosestPair(pub ImmediateBoundary);
+
+type Pair = (MultiBufferOffset, MultiBufferOffset);
+
+impl HelixTextObject for ClosestPair {
+    fn range(
+        &self,
+        map: &DisplaySnapshot,
+        relative_to: Range<DisplayPoint>,
+        around: bool,
+    ) -> Option<Range<DisplayPoint>> {
+        let (open, close) = self.0.delimiters()?;
+        let snapshot = map.buffer_snapshot();
+        let cursor = relative_to.start.to_offset(map, Bias::Left);
+        let (start, end) = if open == close {
+            closest_quote_pair(snapshot, open, cursor)
+        } else {
+            closest_bracket_pair(snapshot, open, close, cursor)
+        }?;
+
+        let range = if around {
+            start..end + close.len_utf8()
+        } else {
+            start + open.len_utf8()..end
+        };
+        Some(range.start.to_display_point(map)..range.end.to_display_point(map))
+    }
+
+    fn next_range(
+        &self,
+        map: &DisplaySnapshot,
+        relative_to: Range<DisplayPoint>,
+        around: bool,
+    ) -> Option<Range<DisplayPoint>> {
+        self.0.next_range(map, relative_to, around)
+    }
+
+    fn previous_range(
+        &self,
+        map: &DisplaySnapshot,
+        relative_to: Range<DisplayPoint>,
+        around: bool,
+    ) -> Option<Range<DisplayPoint>> {
+        self.0.previous_range(map, relative_to, around)
+    }
+}
+
+/// Ranking key for a candidate pair relative to the cursor: enclosing pairs
+/// first (innermost first), then pairs after the cursor, then pairs before it,
+/// each ordered by distance.
+fn pair_rank(cursor: MultiBufferOffset, (start, end): Pair) -> (u8, usize, MultiBufferOffset) {
+    if start <= cursor && cursor <= end {
+        (0, end - start, start)
+    } else if cursor < start {
+        (1, start - cursor, start)
+    } else {
+        (2, cursor - end, start)
+    }
+}
+
+/// Like [`pair_rank`] but without a forward/backward preference, used when
+/// searching beyond the cursor's line.
+fn pair_rank_by_distance(
+    cursor: MultiBufferOffset,
+    pair: Pair,
+) -> (u8, usize, u8, MultiBufferOffset) {
+    match pair_rank(cursor, pair) {
+        (0, span, start) => (0, span, 0, start),
+        (direction, distance, start) => (1, distance, direction, start),
+    }
+}
+
+fn line_range(
+    snapshot: &MultiBufferSnapshot,
+    offset: MultiBufferOffset,
+) -> Range<MultiBufferOffset> {
+    let row = snapshot.offset_to_point(offset).row;
+    let start = snapshot.point_to_offset(Point::new(row, 0));
+    let end = if row < snapshot.max_point().row {
+        snapshot.point_to_offset(Point::new(row + 1, 0))
+    } else {
+        snapshot.len()
+    };
+    start..end
+}
+
+/// Pairs up unescaped occurrences of `quote` within `range`, left to right.
+fn quote_pairs_in(
+    snapshot: &MultiBufferSnapshot,
+    quote: char,
+    range: Range<MultiBufferOffset>,
+) -> Vec<Pair> {
+    let mut pairs = Vec::new();
+    let mut pending = None;
+    let mut preceding_backslashes = snapshot
+        .reversed_chars_at(range.start)
+        .take_while(|ch| *ch == '\\')
+        .count();
+    let mut offset = range.start;
+    for ch in snapshot.chars_at(range.start) {
+        if offset >= range.end {
+            break;
+        }
+        if ch == quote && preceding_backslashes % 2 == 0 {
+            match pending.take() {
+                Some(start) => pairs.push((start, offset)),
+                None => pending = Some(offset),
+            }
+        }
+        preceding_backslashes = if ch == '\\' {
+            preceding_backslashes + 1
+        } else {
+            0
+        };
+        offset += ch.len_utf8();
+    }
+    pairs
+}
+
+fn closest_quote_pair(
+    snapshot: &MultiBufferSnapshot,
+    quote: char,
+    cursor: MultiBufferOffset,
+) -> Option<Pair> {
+    let pairs = quote_pairs_in(snapshot, quote, line_range(snapshot, cursor));
+    if !pairs.is_empty() {
+        return pairs
+            .into_iter()
+            .min_by_key(|&pair| pair_rank(cursor, pair));
+    }
+
+    // Without a pair on the cursor's line (e.g. a string spanning multiple
+    // lines), pair quotes across the whole buffer and pick the nearest pair.
+    quote_pairs_in(snapshot, quote, MultiBufferOffset(0)..snapshot.len())
+        .into_iter()
+        .min_by_key(|&pair| pair_rank_by_distance(cursor, pair))
+}
+
+fn closest_bracket_pair(
+    snapshot: &MultiBufferSnapshot,
+    open: char,
+    close: char,
+    cursor: MultiBufferOffset,
+) -> Option<Pair> {
+    let mut pairs = Vec::new();
+    let mut stack = Vec::new();
+    let mut offset = MultiBufferOffset(0);
+    for ch in snapshot.chars_at(offset) {
+        if ch == open {
+            stack.push(offset);
+        } else if ch == close
+            && let Some(start) = stack.pop()
+        {
+            pairs.push((start, offset));
+        }
+        offset += ch.len_utf8();
+    }
+
+    let (enclosing, others): (Vec<Pair>, Vec<Pair>) = pairs
+        .into_iter()
+        .partition(|&(start, end)| start <= cursor && cursor <= end);
+    if let Some(pair) = enclosing
+        .into_iter()
+        .min_by_key(|&(start, end)| end - start)
+    {
+        return Some(pair);
+    }
+
+    let line = line_range(snapshot, cursor);
+    others
+        .iter()
+        .copied()
+        .filter(|&(start, end)| {
+            let edge = if cursor < start { start } else { end };
+            line.contains(&edge)
+        })
+        .min_by_key(|&pair| pair_rank(cursor, pair))
+        .or_else(|| {
+            others
+                .into_iter()
+                .min_by_key(|&pair| pair_rank_by_distance(cursor, pair))
+        })
+}
+
 /// A textobject whose start and end can be found from an easy-to-find
 /// boundary between two chars by following a simple path from there
 pub enum FuzzyBoundary {
@@ -350,6 +545,20 @@ pub enum FuzzyBoundary {
 }
 
 impl ImmediateBoundary {
+    fn delimiters(&self) -> Option<(char, char)> {
+        match self {
+            Self::Word { .. } | Self::Subword { .. } => None,
+            Self::AngleBrackets => Some(('<', '>')),
+            Self::BackQuotes => Some(('`', '`')),
+            Self::CurlyBrackets => Some(('{', '}')),
+            Self::DoubleQuotes => Some(('"', '"')),
+            Self::Parentheses => Some(('(', ')')),
+            Self::SingleQuotes => Some(('\'', '\'')),
+            Self::SquareBrackets => Some(('[', ']')),
+            Self::VerticalBars => Some(('|', '|')),
+        }
+    }
+
     fn is_inner_start(&self, left: char, right: char, classifier: &CharClassifier) -> bool {
         match self {
             Self::Word { ignore_punctuation } => {
