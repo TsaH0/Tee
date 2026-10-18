@@ -8,7 +8,10 @@ use editor::{DisplayPoint, display_map::DisplaySnapshot, movement};
 use text::Selection;
 
 use crate::{
-    helix::boundary::{ClosestPair, FuzzyBoundary, ImmediateBoundary, NearestPair},
+    helix::boundary::{
+        BRACKET_BOUNDARIES, ClosestPair, ClosestPairOf, FuzzyBoundary, ImmediateBoundary,
+        NearestPair, QUOTE_BOUNDARIES,
+    },
     object::Object as VimObject,
 };
 
@@ -104,7 +107,9 @@ impl VimObject {
     fn to_helix_object(self) -> Option<Box<dyn HelixTextObject>> {
         Some(match self {
             Self::AngleBrackets => Box::new(ClosestPair(ImmediateBoundary::AngleBrackets)),
+            Self::AnyBrackets => Box::new(ClosestPairOf(&BRACKET_BOUNDARIES)),
             Self::AnyPair => Box::new(NearestPair),
+            Self::AnyQuotes => Box::new(ClosestPairOf(&QUOTE_BOUNDARIES)),
             Self::BackQuotes => Box::new(ClosestPair(ImmediateBoundary::BackQuotes)),
             Self::CurlyBrackets => Box::new(ClosestPair(ImmediateBoundary::CurlyBrackets)),
             Self::DoubleQuotes => Box::new(ClosestPair(ImmediateBoundary::DoubleQuotes)),
@@ -367,6 +372,80 @@ mod test {
         cx.set_state("foo bˇar baz", Mode::HelixNormal);
         cx.simulate_keystrokes("m i (");
         cx.assert_state("foo bˇar baz", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_select_nearest_bracket_and_quote_objects(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // `b` is the innermost enclosing (), [] or {}.
+        cx.set_state("f(a, [bˇ, c])", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i b");
+        cx.assert_state("f(a, [«b, cˇ»])", Mode::HelixNormal);
+        cx.set_state("f(a, [bˇ, c])", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a b");
+        cx.assert_state("f(a, «[b, c]ˇ»)", Mode::HelixNormal);
+
+        // Outside any pair, the one that opens nearest to the cursor.
+        cx.set_state("[x] ˇy {z}", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i b");
+        cx.assert_state("[x] y {«zˇ»}", Mode::HelixNormal);
+
+        // `q` is the nearest ", ' or ` quotes.
+        cx.set_state("say 'it \"wˇell\"'", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i q");
+        cx.assert_state("say 'it \"«wellˇ»\"'", Mode::HelixNormal);
+        cx.set_state("say ˇ'it \"well\"'", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i q");
+        cx.assert_state("say '«it \"well\"ˇ»'", Mode::HelixNormal);
+        cx.set_state("a = `bˇc` + \"d\"", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a q");
+        cx.assert_state("a = «`bc`ˇ» + \"d\"", Mode::HelixNormal);
+
+        // `A` is <>.
+        cx.set_state("Vec<Option<ˇu8>>", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i shift-a");
+        cx.assert_state("Vec<Option<«u8ˇ»>>", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_select_next_pair_inside_on_line(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("ˇlet x = foo(bar, \"baz\");", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-m");
+        cx.assert_state("let x = foo(«bar, \"baz\"ˇ»);", Mode::HelixNormal);
+
+        // A pair the cursor is inside is skipped.
+        cx.set_state("foo(bˇar, \"baz\")", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-m");
+        cx.assert_state("foo(bar, \"«bazˇ»\")", Mode::HelixNormal);
+
+        // Only pairs that open on the cursor's line count.
+        cx.set_state("fooˇ bar\n(baz)", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-m");
+        cx.assert_state("fooˇ bar\n(baz)", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_enter_and_shell_command_keys(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+        cx.set_state("ˇone\ntwo", Mode::HelixNormal);
+
+        // Enter shows jump labels instead of moving down a line.
+        cx.simulate_keystrokes("enter");
+        cx.assert_state("ˇone\ntwo", Mode::HelixNormal);
+        cx.simulate_keystrokes("escape");
+
+        cx.simulate_keystrokes("space x");
+        cx.run_until_parked();
+        assert!(cx.workspace(|workspace, _, cx| {
+            workspace
+                .active_modal::<command_palette::CommandPalette>(cx)
+                .is_some()
+        }));
     }
 
     #[gpui::test]

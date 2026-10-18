@@ -365,20 +365,9 @@ impl HelixTextObject for ClosestPair {
         around: bool,
     ) -> Option<Range<DisplayPoint>> {
         let (open, close) = self.0.delimiters()?;
-        let snapshot = map.buffer_snapshot();
         let cursor = relative_to.start.to_offset(map, Bias::Left);
-        let (start, end) = if open == close {
-            closest_quote_pair(snapshot, open, cursor)
-        } else {
-            closest_bracket_pair(snapshot, open, close, cursor)
-        }?;
-
-        let range = if around {
-            start..end + close.len_utf8()
-        } else {
-            start + open.len_utf8()..end
-        };
-        Some(range.start.to_display_point(map)..range.end.to_display_point(map))
+        let pair = closest_pair(map.buffer_snapshot(), open, close, cursor)?;
+        Some(pair_display_range(map, pair, open, close, around))
     }
 
     fn next_range(
@@ -398,6 +387,144 @@ impl HelixTextObject for ClosestPair {
     ) -> Option<Range<DisplayPoint>> {
         self.0.previous_range(map, relative_to, around)
     }
+}
+
+/// The closest pair of any of several kinds (`mib` for brackets, `miq` for
+/// quotes): the innermost pair enclosing the cursor, else the pair that opens
+/// nearest to it.
+pub struct ClosestPairOf(pub &'static [ImmediateBoundary]);
+
+pub const BRACKET_BOUNDARIES: [ImmediateBoundary; 3] = [
+    ImmediateBoundary::Parentheses,
+    ImmediateBoundary::SquareBrackets,
+    ImmediateBoundary::CurlyBrackets,
+];
+
+pub const QUOTE_BOUNDARIES: [ImmediateBoundary; 3] = [
+    ImmediateBoundary::DoubleQuotes,
+    ImmediateBoundary::SingleQuotes,
+    ImmediateBoundary::BackQuotes,
+];
+
+/// The pairs `alt-m` looks for.
+const NEXT_PAIR_BOUNDARIES: [ImmediateBoundary; 7] = [
+    ImmediateBoundary::Parentheses,
+    ImmediateBoundary::SquareBrackets,
+    ImmediateBoundary::CurlyBrackets,
+    ImmediateBoundary::AngleBrackets,
+    ImmediateBoundary::SingleQuotes,
+    ImmediateBoundary::DoubleQuotes,
+    ImmediateBoundary::BackQuotes,
+];
+
+impl HelixTextObject for ClosestPairOf {
+    fn range(
+        &self,
+        map: &DisplaySnapshot,
+        relative_to: Range<DisplayPoint>,
+        around: bool,
+    ) -> Option<Range<DisplayPoint>> {
+        let snapshot = map.buffer_snapshot();
+        let cursor = relative_to.start.to_offset(map, Bias::Left);
+        let (open, close, pair) = self
+            .0
+            .iter()
+            .filter_map(|boundary| {
+                let (open, close) = boundary.delimiters()?;
+                Some((open, close, closest_pair(snapshot, open, close, cursor)?))
+            })
+            .min_by_key(|(_, _, (start, end))| {
+                if *start <= cursor && cursor <= *end {
+                    (0, cursor - *start)
+                } else {
+                    (1, start.0.abs_diff(cursor.0))
+                }
+            })?;
+        Some(pair_display_range(map, pair, open, close, around))
+    }
+
+    fn next_range(
+        &self,
+        map: &DisplaySnapshot,
+        relative_to: Range<DisplayPoint>,
+        around: bool,
+    ) -> Option<Range<DisplayPoint>> {
+        self.0
+            .iter()
+            .filter_map(|boundary| boundary.next_range(map, relative_to.clone(), around))
+            .min_by_key(|range| range.start.to_offset(map, Bias::Left))
+    }
+
+    fn previous_range(
+        &self,
+        map: &DisplaySnapshot,
+        relative_to: Range<DisplayPoint>,
+        around: bool,
+    ) -> Option<Range<DisplayPoint>> {
+        self.0
+            .iter()
+            .filter_map(|boundary| boundary.previous_range(map, relative_to.clone(), around))
+            .max_by_key(|range| range.end.to_offset(map, Bias::Right))
+    }
+}
+
+/// The inside of the first pair of brackets or quotes that opens at or after
+/// `cursor` on its line (`alt-m`). A pair the cursor is inside is skipped,
+/// since its closing delimiter doesn't open a pair.
+pub(crate) fn next_pair_inside_on_line(
+    snapshot: &MultiBufferSnapshot,
+    cursor: MultiBufferOffset,
+) -> Option<Range<MultiBufferOffset>> {
+    let line_end = line_range(snapshot, cursor).end;
+    let mut offset = cursor;
+    for ch in snapshot.chars_at(cursor) {
+        if offset >= line_end || ch == '\n' {
+            break;
+        }
+        for boundary in &NEXT_PAIR_BOUNDARIES {
+            let Some((open, close)) = boundary.delimiters() else {
+                continue;
+            };
+            if ch != open {
+                continue;
+            }
+            if let Some((start, end)) = closest_pair(snapshot, open, close, offset)
+                && start == offset
+            {
+                return Some(start + open.len_utf8()..end);
+            }
+        }
+        offset += ch.len_utf8();
+    }
+    None
+}
+
+fn closest_pair(
+    snapshot: &MultiBufferSnapshot,
+    open: char,
+    close: char,
+    cursor: MultiBufferOffset,
+) -> Option<Pair> {
+    if open == close {
+        closest_quote_pair(snapshot, open, cursor)
+    } else {
+        closest_bracket_pair(snapshot, open, close, cursor)
+    }
+}
+
+fn pair_display_range(
+    map: &DisplaySnapshot,
+    (start, end): Pair,
+    open: char,
+    close: char,
+    around: bool,
+) -> Range<DisplayPoint> {
+    let range = if around {
+        start..end + close.len_utf8()
+    } else {
+        start + open.len_utf8()..end
+    };
+    range.start.to_display_point(map)..range.end.to_display_point(map)
 }
 
 /// Ranking key for a candidate pair relative to the cursor: enclosing pairs

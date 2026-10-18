@@ -775,6 +775,11 @@ impl VimGlobals {
         })
         .detach();
 
+        cx.observe_new(|workspace: &mut Workspace, window, _| {
+            crate::helix::jumplist::register(workspace, window);
+        })
+        .detach();
+
         let mut was_enabled = None;
 
         cx.observe_global::<SettingsStore>(move |cx| {
@@ -1068,8 +1073,21 @@ pub struct SearchState {
     pub prior_selections: Vec<Range<Anchor>>,
     pub prior_operator: Option<Operator>,
     pub prior_mode: Mode,
-    pub helix_select: bool,
+    pub helix_regex: Option<HelixRegexAction>,
     pub _dismiss_subscription: Option<gpui::Subscription>,
+}
+
+/// What a Helix regex prompt does with the current selections once submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelixRegexAction {
+    /// Select all matches within the selections (`s`).
+    Select,
+    /// Split the selections on matches (`S`).
+    Split,
+    /// Keep the selections that contain a match (`K`).
+    Keep,
+    /// Remove the selections that contain a match (`alt-K`).
+    Remove,
 }
 
 impl Operator {

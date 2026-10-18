@@ -4967,6 +4967,17 @@ impl NavHistory {
         }
     }
 
+    /// The entries that `GoBack` and `GoForward` move through, oldest first.
+    pub fn jump_entries(&self) -> Vec<NavigationEntry> {
+        let state = self.0.lock();
+        state
+            .backward_stack
+            .iter()
+            .chain(state.forward_stack.iter().rev())
+            .cloned()
+            .collect()
+    }
+
     pub fn path_for_item(&self, item_id: EntityId) -> Option<(ProjectPath, Option<PathBuf>)> {
         self.0.lock().paths_by_item.get(&item_id).cloned()
     }

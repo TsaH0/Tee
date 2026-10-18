@@ -1,5 +1,6 @@
 mod boundary;
 mod duplicate;
+pub(crate) mod jumplist;
 mod object;
 mod paste;
 mod select;
@@ -13,16 +14,20 @@ use editor::{
 use gpui::actions;
 use gpui::{App, Context, Font, Hsla, Pixels, TaskExt, Window, WindowTextSystem};
 use language::{CharClassifier, CharKind, Point, Selection};
-use multi_buffer::MultiBufferSnapshot;
+use multi_buffer::{Anchor, MultiBufferSnapshot};
+use regex::{Regex, RegexBuilder};
 use search::{BufferSearchBar, SearchOptions};
 use settings::Settings;
 use text::{Bias, LineEnding, SelectionGoal};
 use theme::ActiveTheme as _;
 use ui::px;
+use util::ResultExt as _;
 use workspace::searchable::{self, Direction, FilteredSearchRange};
 
 use crate::motion::{self, MotionKind};
-use crate::state::{HelixJumpBehaviour, HelixJumpLabel, Mode, Operator, SearchState};
+use crate::state::{
+    HelixJumpBehaviour, HelixJumpLabel, HelixRegexAction, Mode, Operator, SearchState,
+};
 use crate::{
     HelixAppendState, PushHelixSurroundAdd, PushHelixSurroundDelete, PushHelixSurroundReplace, Vim,
     motion::{Motion, right},
@@ -48,6 +53,27 @@ actions!(
         HelixSelectLine,
         /// Select all matches of a given pattern within the current selection.
         HelixSelectRegex,
+        /// Split the selections on matches of a given pattern.
+        HelixSplitSelectionRegex,
+        /// Keep only the selections that contain a match of a given pattern.
+        HelixKeepSelections,
+        /// Remove the selections that contain a match of a given pattern.
+        HelixRemoveSelections,
+        /// Merge all selections into a single selection spanning them.
+        HelixMergeSelections,
+        /// Merge selections that directly touch each other.
+        HelixMergeConsecutiveSelections,
+        /// Shrink multi-line selections to only cover the lines they fully contain.
+        HelixShrinkToLineBounds,
+        /// Make all selections face forward, with the cursor at the end.
+        HelixEnsureSelectionsForward,
+        /// Remove the newest selection, unless it is the only one.
+        HelixRemovePrimarySelection,
+        /// Select inside the next pair of brackets or quotes that opens to the
+        /// right of the cursor on the same line.
+        HelixSelectNextPairInside,
+        /// Open the command palette with `:! ` typed, to run a shell command.
+        HelixShellCommand,
         /// Removes all but the one selection that was created last.
         /// `Newest` can eventually be `Primary`.
         HelixKeepNewestSelection,
@@ -80,7 +106,36 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
     Vim::action(editor, cx, Vim::helix_goto_last_modification);
     Vim::action(editor, cx, Vim::helix_goto_line);
     Vim::action(editor, cx, Vim::helix_paste);
-    Vim::action(editor, cx, Vim::helix_select_regex);
+    Vim::action(editor, cx, |vim, _: &HelixSelectRegex, window, cx| {
+        vim.helix_regex_prompt(HelixRegexAction::Select, window, cx);
+    });
+    Vim::action(
+        editor,
+        cx,
+        |vim, _: &HelixSplitSelectionRegex, window, cx| {
+            vim.helix_regex_prompt(HelixRegexAction::Split, window, cx);
+        },
+    );
+    Vim::action(editor, cx, |vim, _: &HelixKeepSelections, window, cx| {
+        vim.helix_regex_prompt(HelixRegexAction::Keep, window, cx);
+    });
+    Vim::action(editor, cx, |vim, _: &HelixRemoveSelections, window, cx| {
+        vim.helix_regex_prompt(HelixRegexAction::Remove, window, cx);
+    });
+    Vim::action(editor, cx, Vim::helix_merge_selections);
+    Vim::action(editor, cx, Vim::helix_merge_consecutive_selections);
+    Vim::action(editor, cx, Vim::helix_shrink_to_line_bounds);
+    Vim::action(editor, cx, Vim::helix_ensure_selections_forward);
+    Vim::action(editor, cx, Vim::helix_remove_primary_selection);
+    Vim::action(editor, cx, Vim::helix_select_next_pair_inside);
+    Vim::action(editor, cx, |vim, _: &HelixShellCommand, window, cx| {
+        let Some(workspace) = vim.workspace(window, cx) else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            command_palette::CommandPalette::toggle(workspace, ":! ", window, cx);
+        })
+    });
     Vim::action(editor, cx, Vim::helix_keep_newest_selection);
     Vim::action(editor, cx, |vim, _: &HelixDuplicateBelow, window, cx| {
         let times = Vim::take_count(cx);
@@ -662,9 +717,9 @@ impl Vim {
         self.switch_mode(Mode::Insert, false, window, cx);
     }
 
-    fn helix_select_regex(
+    fn helix_regex_prompt(
         &mut self,
-        _: &HelixSelectRegex,
+        action: HelixRegexAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -694,7 +749,10 @@ impl Vim {
                         Some(FilteredSearchRange::Selection),
                         window,
                         cx,
-                    ) {
+                    ) && action == HelixRegexAction::Select
+                    {
+                        // Only selecting jumps to matches while typing. The
+                        // other actions apply to the selections on submit.
                         cx.spawn_in(window, async move |search_bar, cx| {
                             if search.await.is_ok() {
                                 search_bar.update_in(cx, |search_bar, window, cx| {
@@ -713,7 +771,7 @@ impl Vim {
                         prior_selections,
                         prior_operator: self.operator_stack.last().cloned(),
                         prior_mode: self.mode,
-                        helix_select: true,
+                        helix_regex: Some(action),
                         _dismiss_subscription: None,
                     }
                 });
@@ -927,6 +985,233 @@ impl Vim {
                 .selections
                 .newest::<MultiBufferOffset>(&editor.display_snapshot(cx));
             editor.change_selections(Default::default(), window, cx, |s| s.select(vec![newest]));
+        });
+    }
+
+    pub(crate) fn helix_apply_regex(
+        &mut self,
+        action: HelixRegexAction,
+        query: &str,
+        prior_selections: Vec<Range<Anchor>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let case_sensitive = EditorSettings::get_global(cx).search.case_sensitive;
+        let Some(regex) = RegexBuilder::new(query)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .log_err()
+        else {
+            return;
+        };
+        self.update_editor(cx, |_, editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            // Ranges go from tail to head. The search bar may have moved the
+            // selections while typing, so prefer the ones from before.
+            let ranges: Vec<Range<MultiBufferOffset>> = if prior_selections.is_empty() {
+                editor
+                    .selections
+                    .all::<MultiBufferOffset>(&editor.display_snapshot(cx))
+                    .iter()
+                    .map(|selection| selection.tail()..selection.head())
+                    .collect()
+            } else {
+                prior_selections
+                    .iter()
+                    .map(|range| range.start.to_offset(&snapshot)..range.end.to_offset(&snapshot))
+                    .collect()
+            };
+
+            let new_ranges = match action {
+                HelixRegexAction::Select => return,
+                HelixRegexAction::Split => split_ranges_on_matches(&snapshot, &ranges, &regex),
+                HelixRegexAction::Keep | HelixRegexAction::Remove => {
+                    let remove = action == HelixRegexAction::Remove;
+                    let kept: Vec<_> = ranges
+                        .iter()
+                        .filter(|range| {
+                            let text: String = snapshot
+                                .text_for_range(
+                                    range.start.min(range.end)..range.start.max(range.end),
+                                )
+                                .collect();
+                            regex.is_match(&text) != remove
+                        })
+                        .cloned()
+                        .collect();
+                    // Like Helix, refuse to remove every selection.
+                    if kept.is_empty() { ranges } else { kept }
+                }
+            };
+            editor.change_selections(Default::default(), window, cx, |s| {
+                s.select_ranges(new_ranges)
+            });
+        });
+    }
+
+    fn helix_merge_selections(
+        &mut self,
+        _: &HelixMergeSelections,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            let selections = editor
+                .selections
+                .all::<MultiBufferOffset>(&editor.display_snapshot(cx));
+            let (Some(first), Some(last)) = (selections.first(), selections.last()) else {
+                return;
+            };
+            let mut merged = *first;
+            merged.end = last.end;
+            merged.reversed = false;
+            editor.change_selections(Default::default(), window, cx, |s| s.select(vec![merged]));
+        });
+    }
+
+    fn helix_merge_consecutive_selections(
+        &mut self,
+        _: &HelixMergeConsecutiveSelections,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            let selections = editor
+                .selections
+                .all::<MultiBufferOffset>(&editor.display_snapshot(cx));
+            let mut merged: Vec<Selection<MultiBufferOffset>> = Vec::new();
+            for selection in selections {
+                match merged.last_mut() {
+                    Some(previous) if previous.end == selection.start => {
+                        previous.end = selection.end;
+                        previous.reversed = false;
+                    }
+                    _ => merged.push(selection),
+                }
+            }
+            editor.change_selections(Default::default(), window, cx, |s| s.select(merged));
+        });
+    }
+
+    fn helix_shrink_to_line_bounds(
+        &mut self,
+        _: &HelixShrinkToLineBounds,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            let display_snapshot = editor.display_snapshot(cx);
+            let buffer = display_snapshot.buffer_snapshot();
+            let max_point = buffer.max_point();
+            let line_start = |row: u32| {
+                if row > max_point.row {
+                    max_point
+                } else {
+                    Point::new(row, 0)
+                }
+            };
+            let mut selections = editor.selections.all::<Point>(&display_snapshot);
+            for selection in &mut selections {
+                let last_char = if selection.is_empty() {
+                    selection.end
+                } else {
+                    let end = buffer.point_to_offset(selection.end);
+                    let previous = buffer
+                        .reversed_chars_at(end)
+                        .next()
+                        .map_or(end, |ch| end - ch.len_utf8());
+                    buffer.offset_to_point(previous).max(selection.start)
+                };
+                let start_row = selection.start.row;
+                let end_row = last_char.row;
+                // Like Helix, leave selections within a single line alone.
+                if start_row == end_row {
+                    continue;
+                }
+
+                let mut start = line_start(start_row);
+                let mut end = line_start(end_row + 1);
+                if start != selection.start {
+                    start = line_start(start_row + 1);
+                }
+                if end != selection.end {
+                    end = line_start(end_row);
+                }
+                selection.start = start;
+                selection.end = end;
+            }
+            editor.change_selections(Default::default(), window, cx, |s| s.select(selections));
+        });
+    }
+
+    fn helix_ensure_selections_forward(
+        &mut self,
+        _: &HelixEnsureSelectionsForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            editor.change_selections(Default::default(), window, cx, |s| {
+                s.move_with(&mut |_, selection| selection.reversed = false);
+            });
+        });
+    }
+
+    fn helix_remove_primary_selection(
+        &mut self,
+        _: &HelixRemovePrimarySelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            let display_snapshot = editor.display_snapshot(cx);
+            let selections = editor
+                .selections
+                .all::<MultiBufferOffset>(&display_snapshot);
+            if selections.len() < 2 {
+                return;
+            }
+            let newest_id = editor
+                .selections
+                .newest::<MultiBufferOffset>(&display_snapshot)
+                .id;
+            let remaining: Vec<_> = selections
+                .into_iter()
+                .filter(|selection| selection.id != newest_id)
+                .collect();
+            editor.change_selections(Default::default(), window, cx, |s| s.select(remaining));
+        });
+    }
+
+    fn helix_select_next_pair_inside(
+        &mut self,
+        _: &HelixSelectNextPairInside,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            let display_snapshot = editor.display_snapshot(cx);
+            let buffer = display_snapshot.buffer_snapshot();
+            let selections = editor
+                .selections
+                .all::<MultiBufferOffset>(&display_snapshot);
+            let ranges: Vec<_> = selections
+                .iter()
+                .map(|selection| {
+                    // The Helix cursor is the character the head is on.
+                    let cursor = if selection.is_empty() || selection.reversed {
+                        selection.head()
+                    } else {
+                        buffer
+                            .reversed_chars_at(selection.head())
+                            .next()
+                            .map_or(selection.head(), |ch| selection.head() - ch.len_utf8())
+                    };
+                    boundary::next_pair_inside_on_line(buffer, cursor)
+                        .unwrap_or(selection.tail()..selection.head())
+                })
+                .collect();
+            editor.change_selections(Default::default(), window, cx, |s| s.select_ranges(ranges));
         });
     }
 
@@ -1872,6 +2157,35 @@ impl HiddenPrefixFitState {
 struct HelixJumpUiData {
     labels: Vec<HelixJumpLabel>,
     overlays: Vec<NavigationTargetOverlay>,
+}
+
+/// Splits each range on the matches of `regex`, like Helix's `S`. Ranges go
+/// from tail to head; the resulting pieces all face forward. Empty ranges are
+/// kept as they are.
+fn split_ranges_on_matches(
+    snapshot: &MultiBufferSnapshot,
+    ranges: &[Range<MultiBufferOffset>],
+    regex: &Regex,
+) -> Vec<Range<MultiBufferOffset>> {
+    let mut pieces = Vec::new();
+    for range in ranges {
+        let range_start = range.start.min(range.end);
+        let range_end = range.start.max(range.end);
+        if range_start == range_end {
+            pieces.push(range.clone());
+            continue;
+        }
+        let text: String = snapshot.text_for_range(range_start..range_end).collect();
+        let mut piece_start = range_start;
+        for found in regex.find_iter(&text) {
+            pieces.push(piece_start..range_start + found.start());
+            piece_start = range_start + found.end();
+        }
+        if piece_start < range_end {
+            pieces.push(piece_start..range_end);
+        }
+    }
+    pieces
 }
 
 #[cfg(test)]
@@ -4795,5 +5109,124 @@ mod test {
         cx.assert_state("hello worldˇ\n", Mode::HelixNormal);
         cx.simulate_keystrokes("o");
         cx.assert_state("hello world\nˇ\n", Mode::Insert);
+    }
+
+    #[gpui::test]
+    async fn test_helix_split_keep_remove_selections_regex(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        // `S` splits the selection on the matches.
+        cx.set_state("«one, two, threeˇ»", Mode::HelixNormal);
+        cx.simulate_keystrokes("shift-s , space");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.assert_state("«oneˇ», «twoˇ», «threeˇ»", Mode::HelixNormal);
+
+        // `K` keeps the selections that contain a match.
+        cx.set_state("«fooˇ» «barˇ» «bazˇ»", Mode::HelixNormal);
+        cx.simulate_keystrokes("shift-k b a");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.assert_state("foo «barˇ» «bazˇ»", Mode::HelixNormal);
+
+        // `alt-K` removes them.
+        cx.set_state("«fooˇ» «barˇ» «bazˇ»", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-shift-k b a");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.assert_state("«fooˇ» bar baz", Mode::HelixNormal);
+
+        // Removing every selection is refused.
+        cx.set_state("«fooˇ» «barˇ»", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-shift-k .");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.assert_state("«fooˇ» «barˇ»", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_merge_selections(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("«oneˇ» two «threeˇ» four", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt--");
+        cx.assert_state("«one two threeˇ» four", Mode::HelixNormal);
+
+        cx.set_state("«oneˇ»«twoˇ» «threeˇ»", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-_");
+        cx.assert_state("«onetwoˇ» «threeˇ»", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_shrink_to_line_bounds(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        // Partially selected first and last lines are dropped.
+        cx.set_state("o«ne\ntwo\nthrˇ»ee\nfour", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-x");
+        cx.assert_state("one\n«two\nˇ»three\nfour", Mode::HelixNormal);
+
+        // Fully selected lines are kept.
+        cx.set_state("«one\ntwo\nˇ»three", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-x");
+        cx.assert_state("«one\ntwo\nˇ»three", Mode::HelixNormal);
+
+        // Selections within a single line are left alone.
+        cx.set_state("o«neˇ»\ntwo", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-x");
+        cx.assert_state("o«neˇ»\ntwo", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_selection_direction_and_primary(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("«ˇone» «ˇtwo»", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-:");
+        cx.assert_state("«oneˇ» «twoˇ»", Mode::HelixNormal);
+
+        // The newest selection is the last one added.
+        cx.set_state("«oneˇ» two", Mode::HelixNormal);
+        cx.simulate_keystrokes("shift-c");
+        cx.simulate_keystrokes("alt-,");
+        cx.assert_state("«oneˇ» two", Mode::HelixNormal);
+
+        // The last selection is never removed.
+        cx.simulate_keystrokes("alt-,");
+        cx.assert_state("«oneˇ» two", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_insert_mode_movement(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("one two\nthrˇee four", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-a");
+        cx.assert_state("one two\nˇthree four", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-e");
+        cx.assert_state("one two\nthree fourˇ", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-b ctrl-b");
+        cx.assert_state("one two\nthree foˇur", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-f");
+        cx.assert_state("one two\nthree fouˇr", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-p");
+        cx.assert_state("one twoˇ\nthree four", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-n");
+        cx.assert_state("one two\nthree fouˇr", Mode::Insert);
+        cx.simulate_keystrokes("alt-b");
+        cx.assert_state("one two\nthree ˇfour", Mode::Insert);
+        cx.simulate_keystrokes("alt-b alt-f");
+        cx.assert_state("one two\nthreeˇ four", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-k");
+        cx.assert_state("one two\nthreeˇ", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-h ctrl-h");
+        cx.assert_state("one two\nthrˇ", Mode::Insert);
+        cx.simulate_keystrokes("ctrl-a ctrl-d");
+        cx.assert_state("one two\nˇhr", Mode::Insert);
     }
 }

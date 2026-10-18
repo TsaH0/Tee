@@ -9,6 +9,16 @@ Welcome to Zed, a high-performance, multiplayer code editor from the creators of
 
 ---
 
+### Installing Tee
+
+This fork extends Zed's Helix mode. To install or update it from the [releases](https://github.com/TsaH0/Tee/releases) on Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-tee.sh | sh
+```
+
+Or build and install it from a checkout with `./script/linux && ./script/install-linux`. Both install into `~/.local` and make it available as `~/.local/bin/zed`.
+
 ### Installation
 
 On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).

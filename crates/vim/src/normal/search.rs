@@ -13,7 +13,7 @@ use crate::{
     Vim, VimSettings,
     command::CommandRange,
     motion::Motion,
-    state::{Mode, SearchState},
+    state::{HelixRegexAction, Mode, SearchState},
 };
 
 /// Moves to the next search match.
@@ -288,7 +288,7 @@ impl Vim {
             prior_selections,
             prior_operator: self.operator_stack.last().cloned(),
             prior_mode,
-            helix_select: false,
+            helix_regex: None,
             _dismiss_subscription: Some(subscription),
         }
     }
@@ -309,13 +309,25 @@ impl Vim {
             return;
         };
         let new_selections = self.editor_selections(window, cx);
+        let mut helix_regex_submission = None;
         let result = pane.update(cx, |pane, cx| {
             let search_bar = pane.toolbar().read(cx).item_of_type::<BufferSearchBar>()?;
-            if self.search.helix_select {
-                search_bar.update(cx, |search_bar, cx| {
-                    search_bar.select_all_matches(&Default::default(), window, cx)
-                });
-                return None;
+            match self.search.helix_regex {
+                Some(HelixRegexAction::Select) => {
+                    search_bar.update(cx, |search_bar, cx| {
+                        search_bar.select_all_matches(&Default::default(), window, cx)
+                    });
+                    return None;
+                }
+                Some(action) => {
+                    let query = search_bar.update(cx, |search_bar, cx| {
+                        search_bar.focus_editor(&Default::default(), window, cx);
+                        search_bar.query(cx)
+                    });
+                    helix_regex_submission = Some((action, query));
+                    return None;
+                }
+                None => {}
             }
             search_bar.update(cx, |search_bar, cx| {
                 let mut count = self.search.count;
@@ -345,6 +357,11 @@ impl Vim {
             })
         });
 
+        if let Some((action, query)) = helix_regex_submission {
+            let prior_selections = std::mem::take(&mut self.search.prior_selections);
+            self.helix_apply_regex(action, &query, prior_selections, window, cx);
+            return;
+        }
         let Some((mut prior_selections, prior_mode, prior_operator)) = result else {
             return;
         };
