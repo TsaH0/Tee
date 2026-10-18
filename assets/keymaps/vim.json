@@ -473,6 +473,8 @@
       "alt-e": "editor::MoveToEndOfLargerSyntaxNode",
       "shift-g": "vim::HelixGotoLine",
       "tab": "pane::GoForward",
+      "enter": "vim::HelixJumpToWord", // not a helix default
+      "alt-m": "vim::HelixSelectNextPairInside", // not a helix default
 
       // Changes
       "shift-r": "editor::Paste",
@@ -598,9 +600,13 @@
       "space b": "tab_switcher::OpenInActivePane",
       "space f": "file_finder::Toggle",
       "space e": "project_panel::ToggleFocus",
+      "space shift-e": "pane::RevealInProjectPanel",
       "space .": "pane::RevealInProjectPanel",
       "space j": "vim::ToggleJumplistView",
       "space g": "git_panel::ToggleFocus",
+      "space shift-g": "git::Diff", // not a helix default, which is the debug menu
+      "space x": "vim::HelixShellCommand", // not a helix default
+      "space shift-x": "terminal_panel::Toggle", // not a helix default
       "space '": "workspace::ReopenLastPicker",
       "space ?": "command_palette::Toggle",
       "space k": "editor::Hover",
@@ -660,17 +666,17 @@
       "shift-z n": "vim::HelixSelectNext",
       "shift-z shift-n": "vim::HelixSelectPrevious",
 
-      // Debug mode (Helix space G)
-      "space shift-g l": "debugger::Start",
-      "space shift-g r": "debugger::Restart",
-      "space shift-g b": "editor::ToggleBreakpoint",
-      "space shift-g c": "debugger::Continue",
-      "space shift-g h": "debugger::Pause",
-      "space shift-g i": "debugger::StepInto",
-      "space shift-g o": "debugger::StepOut",
-      "space shift-g n": "debugger::StepOver",
-      "space shift-g t": "debugger::Stop",
-      "space shift-g ctrl-l": "editor::EditLogBreakpoint",
+      // Debug mode (Helix's `space G`, which shows the git diff here)
+      "space shift-b l": "debugger::Start",
+      "space shift-b r": "debugger::Restart",
+      "space shift-b b": "editor::ToggleBreakpoint",
+      "space shift-b c": "debugger::Continue",
+      "space shift-b h": "debugger::Pause",
+      "space shift-b i": "debugger::StepInto",
+      "space shift-b o": "debugger::StepOut",
+      "space shift-b n": "debugger::StepOver",
+      "space shift-b t": "debugger::Stop",
+      "space shift-b ctrl-l": "editor::EditLogBreakpoint",
 
       // Other
       ":": "command_palette::Toggle",
@@ -815,6 +821,10 @@
     "context": "(vim_operator == a || vim_operator == i || vim_operator == helix_next || vim_operator == helix_previous) && helix_mode",
     "bindings": {
       "m": "vim::AnyPair",
+      // Not Helix defaults: the nearest bracket or quote pair, and `<>`.
+      "b": "vim::AnyBrackets",
+      "q": "vim::AnyQuotes",
+      "shift-a": "vim::AngleBrackets",
       "t": "vim::Class",
       "c": "vim::Comment",
       "x": "vim::Tag",

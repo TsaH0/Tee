@@ -69,6 +69,11 @@ actions!(
         HelixEnsureSelectionsForward,
         /// Remove the newest selection, unless it is the only one.
         HelixRemovePrimarySelection,
+        /// Select inside the next pair of brackets or quotes that opens to the
+        /// right of the cursor on the same line.
+        HelixSelectNextPairInside,
+        /// Open the command palette with `:! ` typed, to run a shell command.
+        HelixShellCommand,
         /// Removes all but the one selection that was created last.
         /// `Newest` can eventually be `Primary`.
         HelixKeepNewestSelection,
@@ -122,6 +127,15 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
     Vim::action(editor, cx, Vim::helix_shrink_to_line_bounds);
     Vim::action(editor, cx, Vim::helix_ensure_selections_forward);
     Vim::action(editor, cx, Vim::helix_remove_primary_selection);
+    Vim::action(editor, cx, Vim::helix_select_next_pair_inside);
+    Vim::action(editor, cx, |vim, _: &HelixShellCommand, window, cx| {
+        let Some(workspace) = vim.workspace(window, cx) else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            command_palette::CommandPalette::toggle(workspace, ":! ", window, cx);
+        })
+    });
     Vim::action(editor, cx, Vim::helix_keep_newest_selection);
     Vim::action(editor, cx, |vim, _: &HelixDuplicateBelow, window, cx| {
         let times = Vim::take_count(cx);
@@ -1166,6 +1180,38 @@ impl Vim {
                 .filter(|selection| selection.id != newest_id)
                 .collect();
             editor.change_selections(Default::default(), window, cx, |s| s.select(remaining));
+        });
+    }
+
+    fn helix_select_next_pair_inside(
+        &mut self,
+        _: &HelixSelectNextPairInside,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(cx, |_, editor, cx| {
+            let display_snapshot = editor.display_snapshot(cx);
+            let buffer = display_snapshot.buffer_snapshot();
+            let selections = editor
+                .selections
+                .all::<MultiBufferOffset>(&display_snapshot);
+            let ranges: Vec<_> = selections
+                .iter()
+                .map(|selection| {
+                    // The Helix cursor is the character the head is on.
+                    let cursor = if selection.is_empty() || selection.reversed {
+                        selection.head()
+                    } else {
+                        buffer
+                            .reversed_chars_at(selection.head())
+                            .next()
+                            .map_or(selection.head(), |ch| selection.head() - ch.len_utf8())
+                    };
+                    boundary::next_pair_inside_on_line(buffer, cursor)
+                        .unwrap_or(selection.tail()..selection.head())
+                })
+                .collect();
+            editor.change_selections(Default::default(), window, cx, |s| s.select_ranges(ranges));
         });
     }
 
