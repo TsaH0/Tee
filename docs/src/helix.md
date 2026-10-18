@@ -23,4 +23,8 @@ In Helix mode, some text object keys follow Helix's meanings instead of Vim's: `
 
 Text objects for a specific pair, such as `m i (` or `m a "`, also work when the cursor is not inside that pair: they select the pair enclosing the cursor if there is one, otherwise the next pair on the cursor's line, then the previous pair on that line, then the nearest pair elsewhere. Quotes are paired from the start of the cursor's line and backslash-escaped quotes are skipped, so the closing quote of one string is never paired with the opening quote of the next one.
 
+`space j` opens a searchable picker over the jumplist (the locations that `ctrl-o` and `ctrl-i`/`tab` move through), newest first.
+
+In insert mode, Helix mode adds readline-style movement on top of Helix's own insert bindings: `ctrl-p`/`ctrl-n` move up/down a line, `ctrl-b`/`ctrl-f` move left/right a character, `ctrl-a`/`ctrl-e` go to the start/end of the line, and `alt-b`/`alt-f` move to the previous word start/next word end. While the completion menu is open, `ctrl-n`/`ctrl-p` still select completions. Helix's `ctrl-k`, `ctrl-d`, `ctrl-h`, `ctrl-j`, `alt-d` and `alt-backspace` work as in Helix. `ctrl-x` keeps Zed's `ctrl-x` chords (for example `ctrl-x ctrl-o` for completions) instead of Helix's completion.
+
 Like Helix, the closest surrounding pair (`m i m`, `m a m`, `m d m`, `m r m`) is matched using the language's syntax tree, so delimiters inside string literals or comments don't count as pairs. In buffers without a language, no pair is matched.

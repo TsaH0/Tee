@@ -1664,6 +1664,13 @@ pub(crate) struct NavigationData {
     scroll_top_row: u32,
 }
 
+/// Returns the cursor anchor and position recorded in navigation history data
+/// pushed by an editor, or `None` if the data came from another kind of item.
+pub fn navigation_data_cursor(data: &dyn Any) -> Option<(Anchor, Point)> {
+    data.downcast_ref::<NavigationData>()
+        .map(|data| (data.cursor_anchor, data.cursor_position))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GotoDefinitionKind {
     Symbol,

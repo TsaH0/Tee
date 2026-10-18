@@ -1540,8 +1540,9 @@ impl Vim {
         }
         // `vim_mode` is replaced by "operator"/"waiting" while an operator is
         // pending, so expose helix-ness separately to allow Helix-specific
-        // bindings in those states (e.g. text objects after `mi`/`ma`).
-        if self.mode.is_helix() {
+        // bindings in those states (e.g. text objects after `mi`/`ma`), and in
+        // insert mode, which Helix mode shares with Vim mode.
+        if self.mode.is_helix() || HelixModeSetting::get_global(cx).0 {
             context.add("helix_mode");
         }
         context.set("vim_mode", mode);
