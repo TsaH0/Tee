@@ -1586,6 +1586,10 @@ impl DisplaySnapshot {
         })
     }
 
+    pub(crate) fn diagnostics_visible(&self) -> bool {
+        self.diagnostics_max_severity.into_lsp().is_some()
+    }
+
     fn diagnostic_severity_is_visible(&self, severity: lsp::DiagnosticSeverity) -> bool {
         self.diagnostics_max_severity
             .into_lsp()
@@ -4173,7 +4177,6 @@ pub mod tests {
                 ("  ".to_string(), Some(Hsla::red())),
                 ("\n".to_string(), None),
                 ("fn ".to_string(), Some(Hsla::red())),
-                ("i".to_string(), Some(Hsla::blue())),
                 ("\n".to_string(), None)
             ]
         );

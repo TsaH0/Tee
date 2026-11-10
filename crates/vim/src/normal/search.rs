@@ -775,6 +775,7 @@ mod test {
     use editor::{DisplayPoint, display_map::DisplayRow};
 
     use indoc::indoc;
+    use itertools::Itertools;
     use search::BufferSearchBar;
     use settings::SettingsStore;
 
@@ -786,6 +787,28 @@ mod test {
         assert_eq!(parsed.search, r"\$test");
         assert_eq!(parsed.replacement, "$$rest");
         assert!(parsed.flag_g);
+    }
+
+    #[gpui::test]
+    async fn test_replace_repetition_operators(cx: &mut gpui::TestAppContext) {
+        let mut cx = NeovimBackedTestContext::new(cx).await;
+
+        cx.set_shared_state("ˇA12345B\nA123B\nAB").await;
+
+        cx.simulate_shared_keystrokes(&r":%s/A\([0-9]\{3\}\)B/\1/g".chars().join(" "))
+            .await;
+        cx.simulate_shared_keystrokes("enter").await;
+        cx.shared_state().await.assert_eq("A12345B\nˇ123\nAB");
+
+        cx.simulate_shared_keystrokes(&r":%s/A\([0-9]\+\)B/\1/g".chars().join(" "))
+            .await;
+        cx.simulate_shared_keystrokes("enter").await;
+        cx.shared_state().await.assert_eq("ˇ12345\n123\nAB");
+
+        cx.simulate_shared_keystrokes(&r":%s/A\([0-9]*\)B/\1/g".chars().join(" "))
+            .await;
+        cx.simulate_shared_keystrokes("enter").await;
+        cx.shared_state().await.assert_eq("12345\n123\nˇ");
     }
 
     #[gpui::test]

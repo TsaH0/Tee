@@ -92,7 +92,7 @@ pub(crate) struct VimPluginSettings {
     flash_find_enabled: bool,
     flash_find_labels: Vec<char>,
     completion_dismiss_enabled: bool,
-    completion_dismiss_keys: Vec<Keystroke>,
+    completion_dismiss_keys: Vec<String>,
     substitute_preview_enabled: bool,
 }
 
@@ -118,15 +118,21 @@ impl Settings for VimPluginSettings {
             }
         }
 
+        // Keys are parsed when they're used, where the host OS is known, which
+        // only matters for `secondary-`.
         let completion_dismiss_keys = completion_dismiss
             .keys
             .unwrap_or_else(|| vec!["j".to_string(), "k".to_string()])
-            .iter()
-            .filter_map(|key| match Keystroke::parse(key) {
-                Ok(keystroke) => Some(keystroke),
-                Err(error) => {
-                    log::error!("invalid key {key:?} in vim.plugins.completion_dismiss: {error}");
-                    None
+            .into_iter()
+            .filter(|key| {
+                match Keystroke::parse_with_os(key, gpui::OperatingSystem::Linux) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        log::error!(
+                            "invalid key {key:?} in vim.plugins.completion_dismiss: {error}"
+                        );
+                        false
+                    }
                 }
             })
             .collect();
@@ -539,8 +545,11 @@ impl VimPlugin for CompletionDismiss {
         if !settings.completion_dismiss_enabled {
             return false;
         }
+        let os = cx.platform_info().os;
         let matches = settings.completion_dismiss_keys.iter().any(|key| {
-            key.modifiers == keystroke.modifiers && key.key.eq_ignore_ascii_case(&keystroke.key)
+            Keystroke::parse_with_os(key, os).is_ok_and(|key| {
+                key.modifiers == keystroke.modifiers && key.key.eq_ignore_ascii_case(&keystroke.key)
+            })
         });
         if matches {
             vim.update_editor(cx, |_, editor, cx| {
