@@ -4924,6 +4924,10 @@ mod test {
 
         cx.set_shared_state("ˇπππππ").await;
         cx.simulate_shared_keystrokes("3 space").await;
+        // `space e` opens the file explorer, so `space` waits for the next key.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
         cx.shared_state().await.assert_eq("πππˇππ");
     }
 
@@ -4936,6 +4940,10 @@ mod test {
             πanotherline"})
             .await;
         cx.simulate_shared_keystrokes("4 space").await;
+        // `space e` opens the file explorer, so `space` waits for the next key.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
         cx.shared_state().await.assert_eq(indoc! {"
             πππππ
             πanˇotherline"});
