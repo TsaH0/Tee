@@ -127,6 +127,9 @@ and `\ze`, the `\@=`, `\@!`, `\@<=` and `\@<!` assertions, back-references, and
 Case conversion in replacements (`\u`, `\U`, `\l`, `\L`) and `\=` expressions
 aren't supported.
 
+`space m` (or `:marks`) opens a searchable list of marks: type a mark's name
+or part of its line, and press `enter` to jump there.
+
 `:!command` runs a command in the terminal panel. Press `escape` or `ctrl-c` in
 the editor afterwards to close it again.
 

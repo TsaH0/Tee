@@ -396,6 +396,7 @@
     "bindings": {
       "escape": "editor::Cancel",
       "space e": "project_panel::ToggleFocus",
+      "space m": "vim::ToggleMarksView",
       "shift-d": "vim::DeleteToEndOfLine",
       "shift-j": "vim::JoinLines",
       "shift-y": "vim::YankLine",
