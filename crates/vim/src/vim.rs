@@ -1263,6 +1263,16 @@ impl Vim {
         if mode != Mode::Insert && mode != Mode::Replace {
             Vim::take_count(cx);
         }
+        let types_text = |mode: Mode| matches!(mode, Mode::Insert | Mode::Replace);
+        if types_text(last_mode) && !types_text(mode) {
+            // Other modes bind their keys only while no menu is open, so a
+            // completions menu left open would swallow the next key.
+            self.update_editor(cx, |_, editor, cx| {
+                if editor.has_visible_completions_menu() {
+                    editor.dismiss_menus_and_popups(false, window, cx);
+                }
+            });
+        }
 
         // Sync editor settings like clip mode
         self.sync_vim_settings(window, cx);

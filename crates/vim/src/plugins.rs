@@ -800,3 +800,184 @@ mod test {
         cx.assert_state("«abc abˇ»c abc", Mode::HelixNormal);
     }
 }
+
+#[cfg(test)]
+mod completion_test {
+    use editor::test::editor_lsp_test_context::EditorLspTestContext;
+
+    use crate::{state::Mode, test::VimTestContext};
+
+    async fn context_with_completions(
+        cx: &mut gpui::TestAppContext,
+        helix: bool,
+    ) -> VimTestContext {
+        VimTestContext::init(cx);
+        let mut cx = VimTestContext::new_with_lsp(
+            EditorLspTestContext::new_rust(
+                lsp::ServerCapabilities {
+                    completion_provider: Some(lsp::CompletionOptions {
+                        trigger_characters: Some(vec![".".to_string()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                cx,
+            )
+            .await,
+            true,
+        );
+        if helix {
+            cx.enable_helix();
+        }
+        // The Linux keymap binds `ctrl-c` differently from the macOS one
+        // the test context loads.
+        cx.update(|_, cx| {
+            cx.clear_key_bindings();
+            for path in ["keymaps/default-linux.json", "keymaps/vim.json"] {
+                let bindings =
+                    settings::KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap();
+                cx.bind_keys(bindings);
+            }
+        });
+        cx.set_request_handler::<lsp::request::Completion, _, _>(move |_, _, _| async move {
+            Ok(Some(lsp::CompletionResponse::Array(vec![
+                lsp::CompletionItem {
+                    label: "first".to_string(),
+                    ..Default::default()
+                },
+            ])))
+        });
+        cx
+    }
+
+    /// Opens the completions menu in insert mode, leaves insert mode with
+    /// `exit`, and checks that `j` and `k` move right away instead of
+    /// waiting for a pending key sequence or the menu.
+    async fn assert_keys_move_after_exiting(
+        cx: &mut VimTestContext,
+        exit: &str,
+        normal_mode: Mode,
+    ) {
+        cx.set_state(
+            "fn main() {\n    let a = 1;\n    a.ˇ\n    let b = 2;\n}",
+            Mode::Insert,
+        );
+        cx.simulate_keystroke("f");
+        cx.condition(|editor, _| editor.context_menu_visible())
+            .await;
+
+        cx.simulate_keystroke(exit);
+        cx.update_editor(|editor, _, _| assert!(!editor.context_menu_visible()));
+        assert_eq!(cx.mode(), normal_mode);
+
+        // Single keystrokes with no timer advanced: a pending sequence or a
+        // menu in the way would leave the cursor where it was.
+        let row = |cx: &mut VimTestContext| {
+            cx.update_editor(|editor, _, cx| {
+                editor
+                    .selections
+                    .newest::<language::Point>(&editor.display_snapshot(cx))
+                    .head()
+                    .row
+            })
+        };
+        let start = row(cx);
+        cx.simulate_keystroke("j");
+        assert_eq!(row(cx), start + 1, "j should move down immediately");
+        cx.simulate_keystroke("k");
+        assert_eq!(row(cx), start, "k should move up immediately");
+        cx.simulate_keystroke("k");
+        assert_eq!(row(cx), start - 1, "k should keep moving immediately");
+    }
+
+    #[gpui::test]
+    async fn test_jk_after_exiting_insert_with_completions(cx: &mut gpui::TestAppContext) {
+        let mut cx = context_with_completions(cx, false).await;
+        assert_keys_move_after_exiting(&mut cx, "ctrl-c", Mode::Normal).await;
+        assert_keys_move_after_exiting(&mut cx, "escape", Mode::Normal).await;
+    }
+
+    #[gpui::test]
+    async fn test_slow_completions_dont_reopen_after_exiting_insert(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut cx = context_with_completions(cx, false).await;
+        let executor = cx.executor();
+        cx.set_request_handler::<lsp::request::Completion, _, _>(move |_, _, _| {
+            let executor = executor.clone();
+            async move {
+                executor.timer(std::time::Duration::from_millis(500)).await;
+                Ok(Some(lsp::CompletionResponse::List(lsp::CompletionList {
+                    // An incomplete list makes every keystroke ask again.
+                    is_incomplete: true,
+                    items: vec![lsp::CompletionItem {
+                        label: "first".to_string(),
+                        ..Default::default()
+                    }],
+                    item_defaults: None,
+                })))
+            }
+        });
+        cx.set_state(
+            "fn main() {\n    let a = 1;\n    a.ˇ\n    let b = 2;\n}",
+            Mode::Insert,
+        );
+        cx.simulate_keystroke("f");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_editor(|editor, _, _| assert!(editor.context_menu_visible()));
+
+        // Another request is in flight when insert mode ends.
+        cx.simulate_keystroke("i");
+        cx.simulate_keystroke("ctrl-c");
+        assert_eq!(cx.mode(), Mode::Normal);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_editor(|editor, _, _| {
+            assert!(
+                !editor.context_menu_visible(),
+                "the menu reopened after leaving insert mode"
+            )
+        });
+    }
+
+    #[gpui::test]
+    async fn test_switch_to_normal_mode_closes_completions(cx: &mut gpui::TestAppContext) {
+        let mut cx = context_with_completions(cx, false).await;
+        // A user keymap can bind `ctrl-c` to switch modes without the
+        // dismissing that `vim::NormalBefore` does.
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "ctrl-c",
+                crate::SwitchToNormalMode,
+                Some("Editor && vim_mode == insert"),
+            )])
+        });
+        cx.set_state(
+            "fn main() {\n    let a = 1;\n    a.ˇ\n    let b = 2;\n}",
+            Mode::Insert,
+        );
+        cx.simulate_keystroke("f");
+        cx.condition(|editor, _| editor.context_menu_visible())
+            .await;
+        cx.simulate_keystroke("ctrl-c");
+        assert_eq!(cx.mode(), Mode::Normal);
+        cx.update_editor(|editor, _, _| assert!(!editor.context_menu_visible()));
+        cx.simulate_keystroke("k");
+        cx.assert_state(
+            "fn main() {\n    letˇ a = 1;\n    a.f\n    let b = 2;\n}",
+            Mode::Normal,
+        );
+    }
+
+    #[gpui::test]
+    async fn test_jk_after_exiting_insert_with_completions_in_helix(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut cx = context_with_completions(cx, true).await;
+        assert_keys_move_after_exiting(&mut cx, "ctrl-c", Mode::HelixNormal).await;
+        assert_keys_move_after_exiting(&mut cx, "escape", Mode::HelixNormal).await;
+    }
+}

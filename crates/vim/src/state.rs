@@ -1475,6 +1475,16 @@ enum MarksMatchInfo {
 }
 
 impl MarksMatchInfo {
+    fn text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            MarksMatchInfo::Path(path) => path.to_string_lossy(),
+            MarksMatchInfo::Title(title) => title.as_str().into(),
+            MarksMatchInfo::Content { line, .. } => line.as_str().into(),
+        }
+    }
+}
+
+impl MarksMatchInfo {
     fn from_chunks<'a>(chunks: impl Iterator<Item = Chunk<'a>>, cx: &App) -> Self {
         let mut line = String::new();
         let mut highlights = Vec::new();
@@ -1526,15 +1536,16 @@ impl PickerDelegate for MarksViewDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        Arc::default()
+        "Jump to a mark…".into()
     }
 
     fn update_matches(
         &mut self,
-        _: String,
+        query: String,
         _: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> gpui::Task<()> {
+        let query = query.trim().to_lowercase();
         let Some(workspace) = self.workspace.upgrade() else {
             return Task::ready(());
         };
@@ -1676,7 +1687,16 @@ impl PickerDelegate for MarksViewDelegate {
                     }
                 }
             });
+            if !query.is_empty() {
+                // A query of just a mark's name picks that mark; anything else
+                // also searches the marked line or file.
+                matches.retain(|mark| {
+                    mark.name.to_lowercase().starts_with(&query)
+                        || mark.info.text().to_lowercase().contains(&query)
+                });
+            }
             let _ = picker.update(cx, |picker, cx| {
+                picker.delegate.selected_index = 0;
                 matches.sort_by_key(|a| {
                     (
                         a.name.chars().next().map(|c| c.is_ascii_uppercase()),
@@ -1826,7 +1846,7 @@ impl MarksView {
             matches,
             workspace,
         };
-        Picker::nonsearchable_uniform_list(delegate, window, cx).initial_width(rems(36.))
+        Picker::uniform_list(delegate, window, cx).initial_width(rems(36.))
     }
 }
 
@@ -1971,5 +1991,69 @@ impl VimDb {
             ))?((workspace_id, mark_name))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod marks_view_test {
+    use picker::Picker;
+
+    use super::MarksViewDelegate;
+    use crate::{state::Mode, test::VimTestContext};
+
+    fn mark_names(cx: &mut VimTestContext) -> Vec<String> {
+        cx.workspace(|workspace, _, cx| {
+            let picker = workspace
+                .active_modal::<Picker<MarksViewDelegate>>(cx)
+                .expect("marks picker should be open");
+            picker
+                .read(cx)
+                .delegate
+                .matches
+                .iter()
+                .map(|mark| mark.name.clone())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn test_marks_picker(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.set_state("ˇfirst line\nsecond line\nthird line", Mode::Normal);
+        cx.simulate_keystrokes("m a j m b j");
+        cx.assert_state("first line\nsecond line\nˇthird line", Mode::Normal);
+
+        cx.simulate_keystrokes("space m");
+        cx.run_until_parked();
+        let names = mark_names(&mut cx);
+        assert!(
+            names.contains(&"a".to_string()) && names.contains(&"b".to_string()),
+            "unexpected marks: {names:?}"
+        );
+
+        // Searching the marked line narrows the list to that mark.
+        cx.simulate_input("second");
+        cx.run_until_parked();
+        assert_eq!(mark_names(&mut cx), vec!["b".to_string()]);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.assert_state("first line\nˇsecond line\nthird line", Mode::Normal);
+    }
+
+    #[gpui::test]
+    async fn test_marks_picker_in_helix_mode(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+        cx.set_state("ˇfirst line\nsecond line", Mode::HelixNormal);
+        cx.simulate_keystrokes("space m");
+        cx.run_until_parked();
+        cx.workspace(|workspace, _, cx| {
+            assert!(
+                workspace
+                    .active_modal::<Picker<MarksViewDelegate>>(cx)
+                    .is_some(),
+                "space m should open the marks picker in Helix mode"
+            );
+        });
     }
 }
