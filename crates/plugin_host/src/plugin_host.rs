@@ -332,7 +332,7 @@ fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
             json!({
                 "type": "initialize",
                 "protocol_version": PROTOCOL_VERSION,
-                "editor": "tee",
+                "editor": "fool",
                 "plugin_dir": plugin_dir,
                 "config_dir": paths::config_dir(),
             })

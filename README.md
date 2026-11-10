@@ -9,17 +9,17 @@ Welcome to Zed, a high-performance, multiplayer code editor from the creators of
 
 ---
 
-### Installing Tee
+### Installing Fool
 
 This fork extends Zed's Helix mode. To install or update it from the [releases](https://github.com/TsaH0/Tee/releases) on Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-tee.sh | sh
+curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-fool.sh | sh
 ```
 
 Or build and install it from a checkout with `./script/linux && ./script/install-linux`. Both install into `~/.local` and make it available as `~/.local/bin/zed`.
 
-Tee adds runtime plugins in any language (no rebuild needed), flash-style `f`/`t` labels, a Vim-exact `:s` with live preview, a Yazi-style file explorer on `space e`, custom modal keymaps and a competitive programming plugin compatible with [cptui](https://github.com/TsaH0/cptui). See [docs/src/tee.md](docs/src/tee.md).
+Fool adds runtime plugins in any language (no rebuild needed), flash-style labels for `f`, `F`, `t` and `T`, a Vim-exact `:s` with live preview, a Yazi-style file explorer on `space e`, custom modal keymaps and a competitive programming plugin compatible with [cptui](https://github.com/TsaH0/cptui). See [docs/src/fool.md](docs/src/fool.md).
 
 ### Installation
 
