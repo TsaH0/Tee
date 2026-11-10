@@ -34,10 +34,10 @@ jobs:
       matrix:
         include:
           # Ubuntu 24.04 ships clang 18, which Zed's WebRTC dependency needs.
+          # Only x86_64 is built; add `ubuntu-24.04-arm` with `arch: aarch64`
+          # here to also release ARM builds.
           - runner: ubuntu-24.04
             arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     env:
