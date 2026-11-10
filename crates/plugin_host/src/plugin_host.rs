@@ -139,6 +139,8 @@ struct PluginHost {
     /// Status bar texts, by plugin.
     statuses: std::collections::BTreeMap<String, String>,
     status_items: Vec<WeakEntity<api::PluginStatusItem>>,
+    /// Modes whose keystrokes go to a plugin.
+    captures: HashMap<String, api::KeyCapture>,
 }
 
 impl Global for PluginHost {}
@@ -161,8 +163,15 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
         keymaps: Vec::new(),
         statuses: Default::default(),
         status_items: Vec::new(),
+        captures: HashMap::default(),
     });
     load_plugins(cx);
+    cx.intercept_keystrokes(|event, window, cx| {
+        if api::capture_keystroke(&event.keystroke, window, cx) {
+            cx.stop_propagation();
+        }
+    })
+    .detach();
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         if let Some(window) = window {
             let item = cx.new(|_| api::PluginStatusItem);
@@ -871,7 +880,8 @@ impl PickerDelegate for CommandPickerDelegate {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::api::PluginRequest;
+    use crate::api::{PluginRequest, bindings_of};
+    use gpui::Focusable as _;
 
     #[test]
     fn test_manifests_and_requests_parse() -> Result<()> {
@@ -905,16 +915,32 @@ mod test {
 import json, sys
 
 next_id = 0
+# Keys and commands that arrive while waiting for a response.
+pending = []
+
 def request(message):
     global next_id
     next_id += 1
     message["id"] = next_id
     print(json.dumps(message), flush=True)
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            raise SystemExit("the editor closed")
         reply = json.loads(line)
         if reply.get("type") == "response" and reply.get("id") == next_id:
             return reply
-    raise SystemExit("the editor closed")
+        pending.append(reply)
+
+def messages():
+    while True:
+        if pending:
+            yield pending.pop(0)
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            return
+        yield json.loads(line)
 
 def check(results):
     errors = []
@@ -944,13 +970,28 @@ def check(results):
     settings = request({"type": "get_settings"})["result"]
     if not isinstance(settings, dict):
         errors.append(f"get_settings gave {settings!r}")
+    # Take over every key bound to an action, like Emacs advice.
+    rebound = request({"type": "override_action", "action": "editor::SelectAll",
+                       "command": "select_all"})
+    if rebound.get("result", {}).get("rebound") != 1:
+        errors.append(f"override_action gave {rebound!r}")
+    keys = [binding["keys"] for binding in request(
+        {"type": "get_bindings", "action": "plugins::RunCommand"})["result"]]
+    if "ctrl-alt-q" not in keys:
+        errors.append(f"ctrl-alt-q isn't bound to the plugin: {keys!r}")
+    missing = request({"type": "override_action", "action": "editor::Nothing", "command": "x"})
+    if "error" not in missing:
+        errors.append("overriding an unbound action should be an error")
+    # From now on the plugin decides what every key does in its mode.
+    request({"type": "capture_keys", "mode": "probe", "except": ["ctrl-alt-p"]})
     with open("result.json", "w") as result:
         json.dump(errors, result)
 
-for line in sys.stdin:
-    message = json.loads(line)
+for message in messages():
     if message.get("type") == "command" and message["command"] == "go":
         check(message)
+    elif message.get("type") == "key":
+        request({"type": "insert", "text": f"[{message['key']}]"})
 "#;
 
     /// Runs a real plugin that uses the request API on an editor, and checks
@@ -971,7 +1012,7 @@ for line in sys.stdin:
         std::fs::write(
             plugin_dir.join("plugin.json"),
             r#"{"name": "probe", "run": ["python3", "probe.py"],
-                "commands": [{"name": "go"}], "keymap": "keymap.json"}"#,
+                "commands": [{"name": "go"}, {"name": "select_all"}], "keymap": "keymap.json"}"#,
         )
         .expect("the manifest");
         std::fs::write(plugin_dir.join("probe.py"), PROBE_PLUGIN).expect("the plugin");
@@ -1051,8 +1092,28 @@ for line in sys.stdin:
         .expect("the plugin's result should be JSON");
         assert!(errors.is_empty(), "the plugin saw: {errors:?}");
 
-        editor.update(cx, |editor, cx| {
-            assert_eq!(editor.text(cx), "hello there\nsecond line\n");
+        // Keys in the captured mode go to the plugin, which decides what
+        // they do.
+        editor.update_in(cx, |editor, window, cx| {
+            window.focus(&editor.focus_handle(cx), cx);
+        });
+        cx.simulate_keystrokes("x shift-y");
+        let started = std::time::Instant::now();
+        while editor.update(cx, |editor, cx| editor.text(cx)) != "hello there\n[x][shift-y] line\n" {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "the plugin didn't handle the keys: {:?}",
+                editor.update(cx, |editor, cx| editor.text(cx))
+            );
+            let (sender, receiver) = futures::channel::oneshot::channel::<()>();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                sender.send(()).ok();
+            });
+            receiver.await.ok();
+        }
+
+        editor.update(cx, |editor, _| {
             let mode = editor
                 .addon::<api::PluginModeAddon>()
                 .and_then(|addon| addon.mode.clone());
@@ -1064,8 +1125,8 @@ for line in sys.stdin:
                 host.statuses.get("probe").map(String::as_str),
                 Some("probe ready")
             );
-            // The manifest's keymap and the `bind_keys` request.
-            assert_eq!(host.keymaps.len(), 2);
+            // The manifest's keymap, `bind_keys` and `override_action`.
+            assert_eq!(host.keymaps.len(), 3);
             let bindings = plugin_key_bindings(cx);
             assert!(bindings.iter().any(|binding| {
                 binding.action().name() == "plugins::RunCommand"
@@ -1076,6 +1137,13 @@ for line in sys.stdin:
             assert!(bindings
                 .iter()
                 .any(|binding| binding.action().name() == "editor::SelectAll"));
+            // The last binding of `ctrl-alt-q` now runs the plugin.
+            let last = bindings_of(None, cx)
+                .into_iter()
+                .filter(|binding| binding.keys == "ctrl-alt-q")
+                .last()
+                .map(|binding| binding.action);
+            assert_eq!(last.as_deref(), Some("plugins::RunCommand"));
         });
     }
 

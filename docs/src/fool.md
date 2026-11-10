@@ -69,6 +69,7 @@ The editor sends:
 | `command` | `id`, `command`, `args` (text after the ex command, or from the binding), `context` |
 | `event` | `event`, `data.file` |
 | `response` | `id`, and `result` or `error`, answering a request that had an `id` |
+| `key` | `key` (like `"j"` or `"ctrl-shift-k"`), `mode` | A keystroke in a mode the plugin captures |
 
 Events are only sent to plugins that list them under `events` in
 `plugin.json`: `saved`, `opened`, `edited`, `selection_changed` and `focused`.
@@ -94,6 +95,10 @@ them to handle afterwards (as `docs/plugins/ki-mode` does).
 | `set_text` | `text` | Replaces the whole text |
 | `set_mode` | `mode` (string or `null`), `cursor` (`block`, `bar`, `underline`, `hollow`) | Gives the active editor a mode that key bindings can match with `fool_mode == <mode>` |
 | `bind_keys` | `keymap` (`keymap.json` format) | Adds key bindings |
+| `get_bindings` | `action` (optional) | Every binding (or `action`'s): `keys`, `context`, `action`, lowest precedence first |
+| `override_action` | `action`, `command`, `args` | Every key bound to `action` runs the plugin's `command` instead, in the same contexts |
+| `capture_keys` | `mode`, `except` (keys) | Every keystroke in editors in `mode` goes to the plugin as a `key` message instead |
+| `release_keys` | `mode` | Stops capturing `mode`'s keystrokes |
 | `dispatch` | `action`, `args` | Runs any action, such as `"editor::SelectAll"` or `"vim::SwitchToInsertMode"` |
 | `get_actions` | | The names of every action |
 | `set_status` | `text` (string or `null`) | Shows text in the status bar |
@@ -105,6 +110,28 @@ them to handle afterwards (as `docs/plugins/ki-mode` does).
 | `get_settings` | | Your `settings.json` |
 | `update_settings` | `settings` | Merges into `settings.json`, for anything settings control |
 | `get_diagnostics` | | The active editor's diagnostics: `start`, `end`, `severity`, `message`, `source` |
+
+### Deciding what keys do
+
+Plugins control keys at three levels, from simplest to most flexible:
+
+1. **Bind keys to plugin commands.** A plugin's `keymap` file (or `bind_keys`)
+   binds any key, sequence or chord, in any context such as
+   `vim_mode == helix_normal`, to `plugins::RunCommand`. Your `keymap.json` can do
+   the same, and `args` passes text to the command.
+2. **Take over a command everywhere.** `override_action` rebinds every key that
+   runs an action, say `vim::NextWordStart` or `editor::Newline`, to the
+   plugin's command, keeping each binding's context. The command can still
+   `dispatch` the original action, so it can do something before or after it,
+   or only in some cases, like Emacs advice.
+3. **Decide every key yourself.** After `set_mode`, `capture_keys` sends every
+   keystroke typed in that mode to the plugin, which can keep any state it
+   likes: counts, operators, chords like Emacs's `C-x C-f`, or a different
+   meaning for each key depending on the selection. Keys in `except` (such as
+   `"ctrl-s"`) still do what they usually do, and `release_keys` or leaving the
+   mode hands keys back.
+
+`get_bindings` shows what keys do, like Emacs's `describe-key` and `where-is`.
 
 ### What plugins can change
 

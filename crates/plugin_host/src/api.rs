@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, anyhow};
 use editor::{Editor, MultiBufferOffset, MultiBufferSnapshot};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    App, Context, DismissEvent, Entity, IntoElement, KeyBinding, KeyContext,
+    App, Focusable as _, Context, DismissEvent, Entity, IntoElement, KeyBinding, KeyContext,
     ParentElement as _, Render, Task, WeakEntity, Window,
 };
 use language::{CursorShape, DiagnosticSeverity, Point};
@@ -132,6 +132,36 @@ pub(crate) enum PluginRequest {
     GetActions {},
     /// Adds key bindings, in the same format as `keymap.json`.
     BindKeys { keymap: Value },
+    /// Every key binding, or those of `action`: each binding's `keys`,
+    /// `context` and `action`, from lowest to highest precedence.
+    GetBindings {
+        #[serde(default)]
+        action: Option<String>,
+    },
+    /// Makes every key bound to `action` run the plugin's `command` instead,
+    /// in the same contexts. The command can still `dispatch` the action, to
+    /// add behavior before or after it.
+    OverrideAction {
+        action: String,
+        command: String,
+        #[serde(default)]
+        args: Option<String>,
+    },
+    /// Sends every keystroke in editors whose mode is `mode` to the plugin as
+    /// a `key` message instead of handling it, except the keys in `except`.
+    CaptureKeys {
+        mode: String,
+        #[serde(default)]
+        except: Vec<String>,
+    },
+    /// Stops capturing the keystrokes of `mode`.
+    ReleaseKeys { mode: String },
+}
+
+/// A mode whose keystrokes go to a plugin.
+pub(crate) struct KeyCapture {
+    pub plugin: String,
+    pub except: Vec<String>,
 }
 
 /// Where the response to a request goes.
@@ -462,15 +492,142 @@ fn apply_immediate(
             return Ok(json!(cx.all_action_names()));
         }
         PluginRequest::BindKeys { keymap } => {
-            let source = serde_json::to_string(&keymap)?;
-            let bindings = parse_keymap(&source, cx)?;
-            cx.global_mut::<PluginHost>()
-                .keymaps
-                .push((plugin.to_string(), source));
-            cx.bind_keys(bindings);
+            bind_plugin_keys(plugin, &keymap, cx)?;
+        }
+        PluginRequest::GetBindings { action } => {
+            return Ok(Value::Array(
+                bindings_of(action.as_deref(), cx)
+                    .into_iter()
+                    .map(|binding| {
+                        json!({
+                            "keys": binding.keys,
+                            "context": binding.context,
+                            "action": binding.action,
+                        })
+                    })
+                    .collect(),
+            ));
+        }
+        PluginRequest::OverrideAction {
+            action,
+            command,
+            args,
+        } => {
+            let bindings = bindings_of(Some(&action), cx);
+            anyhow::ensure!(!bindings.is_empty(), "no keys are bound to {action}");
+            let mut blocks: BTreeMap<Option<String>, serde_json::Map<String, Value>> =
+                BTreeMap::new();
+            for binding in &bindings {
+                blocks.entry(binding.context.clone()).or_default().insert(
+                    binding.keys.clone(),
+                    json!([
+                        "plugins::RunCommand",
+                        { "plugin": plugin, "command": command, "args": args }
+                    ]),
+                );
+            }
+            let keymap = blocks
+                .into_iter()
+                .map(|(context, bindings)| match context {
+                    Some(context) => json!({ "context": context, "bindings": bindings }),
+                    None => json!({ "bindings": bindings }),
+                })
+                .collect::<Vec<_>>();
+            bind_plugin_keys(plugin, &Value::Array(keymap), cx)?;
+            return Ok(json!({ "rebound": bindings.len() }));
+        }
+        PluginRequest::CaptureKeys { mode, except } => {
+            cx.global_mut::<PluginHost>().captures.insert(
+                mode,
+                KeyCapture {
+                    plugin: plugin.to_string(),
+                    except,
+                },
+            );
+        }
+        PluginRequest::ReleaseKeys { mode } => {
+            cx.global_mut::<PluginHost>().captures.remove(&mode);
         }
     }
     Ok(Value::Null)
+}
+
+fn bind_plugin_keys(plugin: &str, keymap: &Value, cx: &mut App) -> Result<()> {
+    let source = serde_json::to_string(keymap)?;
+    let bindings = parse_keymap(&source, cx)?;
+    cx.global_mut::<PluginHost>()
+        .keymaps
+        .push((plugin.to_string(), source));
+    cx.bind_keys(bindings);
+    Ok(())
+}
+
+pub(crate) struct BindingInfo {
+    pub keys: String,
+    pub context: Option<String>,
+    pub action: String,
+}
+
+/// The key bindings, or those of `action`, lowest precedence first.
+pub(crate) fn bindings_of(action: Option<&str>, cx: &App) -> Vec<BindingInfo> {
+    let os = cx.platform_info().os;
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    keymap
+        .bindings()
+        .filter(|binding| action.is_none_or(|action| binding.action().name() == action))
+        .map(|binding| BindingInfo {
+            keys: binding
+                .keystrokes()
+                .iter()
+                .map(|keystroke| keystroke.unparse(os))
+                .collect::<Vec<_>>()
+                .join(" "),
+            context: binding.predicate().map(|predicate| predicate.to_string()),
+            action: binding.action().name().to_string(),
+        })
+        .collect()
+}
+
+/// Sends `keystroke` to the plugin capturing the focused editor's mode,
+/// returning whether it was captured.
+pub(crate) fn capture_keystroke(
+    keystroke: &gpui::Keystroke,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if cx.global::<PluginHost>().captures.is_empty() {
+        return false;
+    }
+    let Some(Some(multi_workspace)) = window.root::<workspace::MultiWorkspace>() else {
+        return false;
+    };
+    let workspace = multi_workspace.read(cx).workspace().clone();
+    let Some(editor) = workspace.read(cx).active_item_as::<Editor>(cx) else {
+        return false;
+    };
+    if !editor.focus_handle(cx).is_focused(window) {
+        return false;
+    }
+    let Some(mode) = editor
+        .read(cx)
+        .addon::<PluginModeAddon>()
+        .and_then(|addon| addon.mode.clone())
+    else {
+        return false;
+    };
+    let os = cx.platform_info().os;
+    let key = keystroke.unparse(os);
+    let Some(capture) = cx.global::<PluginHost>().captures.get(&mode) else {
+        return false;
+    };
+    if capture.except.iter().any(|except| *except == key) {
+        return false;
+    }
+    let plugin = capture.plugin.clone();
+    let message = json!({ "type": "key", "key": key, "mode": mode }).to_string();
+    crate::send_to_plugin(&plugin, message, cx);
+    true
 }
 
 pub(crate) fn parse_keymap(source: &str, cx: &App) -> Result<Vec<KeyBinding>> {
