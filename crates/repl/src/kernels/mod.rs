@@ -315,7 +315,7 @@ impl KernelSpecification {
                     .clone()
                     .unwrap_or_else(|| "Python Environment".to_string()),
             ),
-            Self::JupyterServer(_) => "Jupyter Server".into(),
+            Self::JupyterServer(spec) => spec.server_name.clone().into(),
             Self::SshRemote(_) => "SSH Remote".into(),
             Self::WslRemote(_) => "WSL Remote".into(),
         }
@@ -357,7 +357,7 @@ impl KernelSpecification {
                 .as_ref()
                 .map(|kind| SharedString::from(kind.clone())),
             Self::Jupyter(_) => Some("Jupyter".into()),
-            Self::JupyterServer(_) => Some("Jupyter Server".into()),
+            Self::JupyterServer(spec) => Some(spec.server_name.clone().into()),
             Self::SshRemote(_) => Some("SSH Remote".into()),
             Self::WslRemote(_) => Some("WSL Remote".into()),
         }

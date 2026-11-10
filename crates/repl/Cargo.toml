@@ -29,8 +29,10 @@ feature_flags.workspace = true
 file_icons.workspace = true
 futures.workspace = true
 gpui.workspace = true
+gpui_tokio.workspace = true
 html_to_markdown.workspace = true
 http_client.workspace = true
+http_client_tls.workspace = true
 image.workspace = true
 jupyter-websocket-client.workspace = true
 jupyter-protocol.workspace = true
@@ -69,9 +71,11 @@ indoc.workspace = true
 language = { workspace = true, features = ["test-support"] }
 languages = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
+reqwest_client.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 task.workspace = true
 terminal_view = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 theme = { workspace = true, features = ["test-support"] }
 tree-sitter-md.workspace = true
 tree-sitter-typescript.workspace = true
