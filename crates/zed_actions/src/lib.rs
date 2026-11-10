@@ -983,6 +983,36 @@ pub mod notebook {
             EnterEditMode,
             /// Exits the cell editor and returns to cell command mode.
             EnterCommandMode,
+            /// Inserts a code cell above the current cell.
+            InsertCellAbove,
+            /// Inserts a code cell below the current cell.
+            InsertCellBelow,
+            /// Turns the current cell into a code cell.
+            ChangeCellToCode,
+            /// Turns the current cell into a markdown cell.
+            ChangeCellToMarkdown,
+            /// Copies the current cell.
+            CopyCell,
+            /// Cuts the current cell.
+            CutCell,
+            /// Pastes the copied or cut cell below the current cell.
+            PasteCellBelow,
+            /// Pastes the copied or cut cell above the current cell.
+            PasteCellAbove,
+            /// Restores the most recently deleted cell.
+            UndoDeleteCell,
+            /// Runs every cell above the current one.
+            RunAllAbove,
+            /// Runs the current cell and every cell below it.
+            RunCellAndBelow,
+            /// Runs the current cell and inserts a code cell below it.
+            RunAndInsertBelow,
+            /// Restarts the kernel, then runs every cell.
+            RestartAndRunAll,
+            /// Clears the current cell's outputs.
+            ClearCellOutput,
+            /// Opens the kernel picker.
+            SelectKernel,
         ]
     );
 }
