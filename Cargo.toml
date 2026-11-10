@@ -38,6 +38,7 @@ members = [
     "crates/collab_ui",
     "crates/collections",
     "crates/command_palette",
+    "crates/competitive_programming",
     "crates/command_palette_hooks",
     "crates/component",
     "crates/component_preview",
@@ -163,6 +164,7 @@ members = [
     "crates/path",
     "crates/paths",
     "crates/picker",
+    "crates/plugin_host",
     "crates/picker_preview",
     "crates/platform_title_bar",
     "crates/prettier",
@@ -316,6 +318,7 @@ collab = { path = "crates/collab" }
 collab_ui = { path = "crates/collab_ui" }
 collections = { path = "crates/collections", version = "0.1.0" }
 command_palette = { path = "crates/command_palette" }
+competitive_programming = { path = "crates/competitive_programming" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
 compliance = { path = "tooling/compliance" }
 component = { path = "crates/component" }
@@ -437,6 +440,7 @@ path = { path = "crates/path" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf", default-features = false }
 picker = { path = "crates/picker" }
+plugin_host = { path = "crates/plugin_host" }
 picker_preview = { path = "crates/picker_preview" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 prettier = { path = "crates/prettier" }

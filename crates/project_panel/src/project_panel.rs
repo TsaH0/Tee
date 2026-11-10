@@ -406,6 +406,9 @@ actions!(
         Open,
         /// Opens the selected file in a permanent tab.
         OpenPermanent,
+        /// Opens the selected file and closes the project panel, or expands
+        /// or collapses the selected directory.
+        OpenAndClosePanel,
         /// Opens the selected file in a vertical split.
         OpenSplitVertical,
         /// Opens the selected file in a horizontal split.
@@ -1971,6 +1974,27 @@ impl ProjectPanel {
 
     fn open_permanent(&mut self, _: &OpenPermanent, window: &mut Window, cx: &mut Context<Self>) {
         self.open_internal(false, true, None, window, cx);
+    }
+
+    fn open_and_close_panel(
+        &mut self,
+        _: &OpenAndClosePanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, entry)) = self.selected_entry(cx) else {
+            return;
+        };
+        if !entry.is_file() {
+            self.toggle_expanded(entry.id, window, cx);
+            return;
+        }
+        self.open_entry(entry.id, true, false, cx);
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.close_panel::<ProjectPanel>(window, cx);
+            })
+            .ok();
     }
 
     fn open_split_vertical(
@@ -7634,6 +7658,7 @@ impl Render for ProjectPanel {
                 .on_action(cx.listener(Self::expand_selected_entry_and_children))
                 .on_action(cx.listener(Self::open))
                 .on_action(cx.listener(Self::open_permanent))
+                .on_action(cx.listener(Self::open_and_close_panel))
                 .on_action(cx.listener(Self::open_split_vertical))
                 .on_action(cx.listener(Self::open_split_horizontal))
                 .on_action(cx.listener(Self::open_markdown_preview))

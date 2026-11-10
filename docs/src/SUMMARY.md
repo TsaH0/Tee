@@ -107,6 +107,7 @@
 - [Keybindings](./key-bindings.md)
   - [Vim Mode](./vim.md)
   - [Helix Mode](./helix.md)
+  - [Tee Plugins and Customization](./tee.md)
 
 # Language Support
 

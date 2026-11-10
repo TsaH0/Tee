@@ -413,7 +413,12 @@ impl VimPlugin for FlashFind {
             let visible_range =
                 Vim::visible_jump_range(editor, &snapshot, display_snapshot, cx);
             let visible_start = buffer.point_to_offset(visible_range.start);
-            let visible_end = buffer.point_to_offset(visible_range.end);
+            // The visible range ends at the start of the last visible line.
+            let last_row = visible_range.end.row.min(buffer.max_point().row);
+            let visible_end = buffer.point_to_offset(Point::new(
+                last_row,
+                buffer.line_len(multi_buffer::MultiBufferRow(last_row)),
+            ));
 
             // Motions start from the character under the cursor, which in a
             // forward selection is the one before the head.
@@ -695,4 +700,64 @@ fn unescape_replacement(replacement: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod test {
+    use indoc::indoc;
+
+    use crate::{state::Mode, test::VimTestContext};
+
+    #[gpui::test]
+    async fn test_flash_find_labels(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        cx.set_state("ˇabc abc abc abc", Mode::Normal);
+        cx.simulate_keystrokes("f c");
+        cx.assert_state("abˇc abc abc abc", Mode::Normal);
+        // The second occurrence after the cursor gets the first label.
+        cx.simulate_keystrokes("s");
+        cx.assert_state("abc abc abˇc abc", Mode::Normal);
+
+        cx.set_state("ˇabc abc abc", Mode::Normal);
+        cx.simulate_keystrokes("t c a");
+        cx.assert_state("abc aˇbc abc", Mode::Normal);
+
+        // Any other key removes the labels and works as usual.
+        cx.set_state("ˇabc abc abc", Mode::Normal);
+        cx.simulate_keystrokes("f c l");
+        cx.assert_state("abcˇ abc abc", Mode::Normal);
+
+        // Labels reach other lines, and occurrences behind the cursor.
+        cx.set_state(
+            indoc! {"
+                xc ˇc c
+                c"},
+            Mode::Normal,
+        );
+        cx.simulate_keystrokes("f c");
+        cx.assert_state(
+            indoc! {"
+                xc c ˇc
+                c"},
+            Mode::Normal,
+        );
+        cx.simulate_keystrokes("s");
+        cx.assert_state(
+            indoc! {"
+                xˇc c c
+                c"},
+            Mode::Normal,
+        );
+    }
+
+    #[gpui::test]
+    async fn test_flash_find_in_helix_mode(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("ˇabc abc abc", Mode::HelixNormal);
+        cx.simulate_keystrokes("f c a");
+        cx.assert_state("«abc abcˇ» abc", Mode::HelixNormal);
+    }
 }

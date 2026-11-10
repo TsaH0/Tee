@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-tee.s
 
 Or build and install it from a checkout with `./script/linux && ./script/install-linux`. Both install into `~/.local` and make it available as `~/.local/bin/zed`.
 
+Tee adds runtime plugins in any language (no rebuild needed), flash-style `f`/`t` labels, a Vim-exact `:s` with live preview, a Yazi-style file explorer on `space e`, custom modal keymaps and a competitive programming plugin compatible with [cptui](https://github.com/TsaH0/cptui). See [docs/src/tee.md](docs/src/tee.md).
+
 ### Installation
 
 On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).

@@ -240,6 +240,7 @@ impl VsCodeSettings {
             theme: Box::new(self.theme_settings_content()),
             title_bar: None,
             vim: None,
+            competitive_programming: None,
             vim_mode: None,
             workspace: self.workspace_settings_content(),
             which_key: None,

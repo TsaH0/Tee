@@ -542,6 +542,8 @@ pub(crate) struct Vim {
     last_command: Option<String>,
     running_command: Option<Task<()>>,
     plugins: Vec<Box<dyn plugins::VimPlugin>>,
+    /// Whether `:!` showed output in a terminal that Escape should close.
+    pub(crate) shell_output_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -611,6 +613,7 @@ impl Vim {
             running_command: None,
 
             plugins: plugins::create_plugins(),
+            shell_output_open: false,
 
             editor: editor.downgrade(),
             _subscriptions: vec![
@@ -1505,6 +1508,10 @@ impl Vim {
         .to_string();
 
         let mut operator_id = "none";
+
+        if self.shell_output_open {
+            context.add("vim_shell_output");
+        }
 
         let active_operator = self.active_operator();
         if active_operator.is_none() && cx.global::<VimGlobals>().pre_count.is_some()
