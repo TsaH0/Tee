@@ -1035,6 +1035,23 @@ pub struct JupyterContent {
     ///
     /// Default: `{}`
     pub kernel_selections: Option<HashMap<String, String>>,
+
+    /// Remote Jupyter servers whose kernels can run notebooks and REPL code,
+    /// such as a Google Colab runtime.
+    ///
+    /// Default: `[]`
+    pub servers: Option<Vec<JupyterServerContent>>,
+}
+
+/// A remote Jupyter server.
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
+pub struct JupyterServerContent {
+    /// The name shown in the kernel picker.
+    pub name: Option<String>,
+    /// The server's URL including its token, as Jupyter prints it, such as
+    /// `https://example.trycloudflare.com/?token=abc`.
+    pub url: Option<String>,
 }
 
 /// Whether to allow drag and drop text selection in buffer.

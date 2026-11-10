@@ -1,4 +1,5 @@
 pub mod components;
+mod jupyter_servers;
 mod jupyter_settings;
 pub mod kernels;
 pub mod notebook;
@@ -16,6 +17,7 @@ use gpui::{App, PlatformDispatcher, Priority, RunnableMeta};
 pub use jupyter_protocol::ExecutionState;
 use project::Fs;
 
+pub use crate::jupyter_servers::{COLAB_RUNTIME_CELL, ConnectToColab, ConnectToJupyterServer};
 pub use crate::jupyter_settings::JupyterSettings;
 pub use crate::kernels::{Kernel, KernelSpecification, KernelStatus, PythonEnvKernelSpecification};
 pub use crate::repl_editor::*;
@@ -31,6 +33,7 @@ pub const KERNEL_DOCS_URL: &str = "https://zed.dev/docs/repl#changing-kernels";
 pub fn init(fs: Arc<dyn Fs>, cx: &mut App) {
     set_dispatcher(zed_dispatcher(cx));
     repl_sessions_ui::init(cx);
+    jupyter_servers::init(cx);
     ReplStore::init(fs, cx);
 }
 

@@ -111,6 +111,12 @@ pub enum Cell {
     Raw(Entity<RawCell>),
 }
 
+/// Splits a cell's text into notebook source lines, keeping each line's
+/// newline, so that joining them gives back exactly the same text.
+fn notebook_source_lines(source: &str) -> Vec<String> {
+    source.split_inclusive('\n').map(str::to_string).collect()
+}
+
 pub(crate) enum MovementDirection {
     Start,
     End,
@@ -524,7 +530,7 @@ impl MarkdownCell {
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
         let source = self.current_source(cx);
-        let source_lines: Vec<String> = source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = notebook_source_lines(&source);
 
         nbformat::v4::Cell::Markdown {
             id: self.id.clone(),
@@ -814,7 +820,7 @@ impl CodeCell {
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
         let source = self.current_source(cx);
-        let source_lines: Vec<String> = source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = notebook_source_lines(&source);
 
         let outputs = self.outputs_to_nbformat(cx);
 
@@ -1283,7 +1289,7 @@ pub struct RawCell {
 
 impl RawCell {
     pub fn to_nbformat_cell(&self) -> nbformat::v4::Cell {
-        let source_lines: Vec<String> = self.source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = notebook_source_lines(&self.source);
 
         nbformat::v4::Cell::Raw {
             id: self.id.clone(),

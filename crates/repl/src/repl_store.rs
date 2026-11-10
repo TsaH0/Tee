@@ -51,9 +51,17 @@ impl ReplStore {
     }
 
     pub fn new(fs: Arc<dyn Fs>, cx: &mut Context<Self>) -> Self {
+        let mut servers = JupyterSettings::get_global(cx).servers.clone();
         let subscriptions = vec![
             cx.observe_global::<SettingsStore>(move |this, cx| {
                 this.set_enabled(JupyterSettings::enabled(cx), cx);
+                let new_servers = &JupyterSettings::get_global(cx).servers;
+                if *new_servers != servers {
+                    servers = new_servers.clone();
+                    if this.kernelspecs_initialized {
+                        this.refresh_kernelspecs(cx).detach_and_log_err(cx);
+                    }
+                }
             }),
             cx.on_app_quit(Self::shutdown_all_sessions),
         ];
@@ -214,33 +222,57 @@ impl ReplStore {
         })
     }
 
+    /// The Jupyter servers in the settings, plus one from the
+    /// `JUPYTER_SERVER` and `JUPYTER_TOKEN` environment variables.
+    fn jupyter_servers(cx: &App) -> Vec<(String, RemoteServer)> {
+        let mut servers = Vec::new();
+        if let (Ok(base_url), Ok(token)) = (
+            std::env::var("JUPYTER_SERVER"),
+            std::env::var("JUPYTER_TOKEN"),
+        ) {
+            servers.push((
+                crate::jupyter_settings::url_host(&base_url),
+                RemoteServer { base_url, token },
+            ));
+        }
+        for server in &JupyterSettings::get_global(cx).servers {
+            match RemoteServer::from_url(&server.url) {
+                Ok(remote_server) => servers.push((server.name.clone(), remote_server)),
+                Err(error) => log::error!("invalid Jupyter server {}: {error:#}", server.name),
+            }
+        }
+        servers
+    }
+
     fn get_remote_kernel_specifications(
         &self,
         cx: &mut Context<Self>,
     ) -> Option<Task<Result<Vec<KernelSpecification>>>> {
-        match (
-            std::env::var("JUPYTER_SERVER"),
-            std::env::var("JUPYTER_TOKEN"),
-        ) {
-            (Ok(server), Ok(token)) => {
-                let remote_server = RemoteServer {
-                    base_url: server,
-                    token,
-                };
-                let http_client = cx.http_client();
-                Some(cx.spawn(async move |_, _| {
-                    list_remote_kernelspecs(remote_server, http_client)
-                        .await
-                        .map(|specs| {
-                            specs
-                                .into_iter()
-                                .map(KernelSpecification::JupyterServer)
-                                .collect()
-                        })
-                }))
-            }
-            _ => None,
+        let servers = Self::jupyter_servers(cx);
+        if servers.is_empty() {
+            return None;
         }
+        let http_client = cx.http_client();
+        Some(cx.spawn(async move |_, _| {
+            let mut specs = Vec::new();
+            for (name, remote_server) in servers {
+                // One unreachable server, such as a Colab runtime that has
+                // shut down, shouldn't hide the others.
+                match list_remote_kernelspecs(name.clone(), remote_server, http_client.clone())
+                    .await
+                {
+                    Ok(server_specs) => specs.extend(
+                        server_specs
+                            .into_iter()
+                            .map(KernelSpecification::JupyterServer),
+                    ),
+                    Err(error) => {
+                        log::error!("failed to list kernels of Jupyter server {name}: {error:#}")
+                    }
+                }
+            }
+            anyhow::Ok(specs)
+        }))
     }
 
     pub fn ensure_kernelspecs(&mut self, cx: &mut Context<Self>) {

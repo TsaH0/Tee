@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-fool.
 
 Or build and install it from a checkout with `./script/linux && ./script/install-linux`. Both install into `~/.local` and make it available as `~/.local/bin/zed`.
 
-Fool adds runtime plugins in any language (no rebuild needed), flash-style labels for `f`, `F`, `t` and `T`, a Vim-exact `:s` with live preview, a Yazi-style file explorer on `space e`, custom modal keymaps and a competitive programming plugin compatible with [cptui](https://github.com/TsaH0/cptui). See [docs/src/fool.md](docs/src/fool.md).
+Fool adds runtime plugins in any language (no rebuild needed), flash-style labels for `f`, `F`, `t` and `T`, a Vim-exact `:s` with live preview, a Yazi-style file explorer on `space e`, custom modal keymaps, Jupyter notebooks that can run on Google Colab's GPUs, and a competitive programming plugin compatible with [cptui](https://github.com/TsaH0/cptui). See [docs/src/fool.md](docs/src/fool.md).
 
 ### Installation
 

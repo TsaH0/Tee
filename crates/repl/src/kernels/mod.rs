@@ -315,7 +315,7 @@ impl KernelSpecification {
                     .clone()
                     .unwrap_or_else(|| "Python Environment".to_string()),
             ),
-            Self::JupyterServer(_) => "Jupyter Server".into(),
+            Self::JupyterServer(spec) => spec.server_name.clone().into(),
             Self::SshRemote(_) => "SSH Remote".into(),
             Self::WslRemote(_) => "WSL Remote".into(),
         }
@@ -357,7 +357,7 @@ impl KernelSpecification {
                 .as_ref()
                 .map(|kind| SharedString::from(kind.clone())),
             Self::Jupyter(_) => Some("Jupyter".into()),
-            Self::JupyterServer(_) => Some("Jupyter Server".into()),
+            Self::JupyterServer(spec) => Some(spec.server_name.clone().into()),
             Self::SshRemote(_) => Some("SSH Remote".into()),
             Self::WslRemote(_) => Some("WSL Remote".into()),
         }
@@ -765,4 +765,68 @@ impl Kernel {
             | Kernel::Shutdown => false,
         }
     }
+}
+
+/// Runs a real Jupyter server for tests, when one is installed.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{
+        net::TcpListener,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    use anyhow::Result;
+
+    pub(crate) struct JupyterServerProcess(Child);
+
+    impl Drop for JupyterServerProcess {
+        fn drop(&mut self) {
+            self.0.kill().ok();
+            self.0.wait().ok();
+        }
+    }
+
+    /// Starts `jupyter server` from `JUPYTER_TEST_BIN` (or `jupyter` on the
+    /// `PATH`), returning `None` when it isn't installed.
+    pub(crate) fn start_jupyter_server(token: &str) -> Option<(JupyterServerProcess, String)> {
+        let jupyter = std::env::var("JUPYTER_TEST_BIN").unwrap_or_else(|_| "jupyter".into());
+        let port = TcpListener::bind("127.0.0.1:0")
+            .ok()?
+            .local_addr()
+            .ok()?
+            .port();
+        let root = std::env::temp_dir();
+        let child = Command::new(&jupyter)
+            .args([
+                "server",
+                "--no-browser",
+                "--allow-root",
+                "--ServerApp.ip=127.0.0.1",
+                &format!("--ServerApp.port={port}"),
+                "--ServerApp.port_retries=0",
+                &format!("--IdentityProvider.token={token}"),
+                &format!("--ServerApp.root_dir={}", root.display()),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        Some((JupyterServerProcess(child), format!("http://127.0.0.1:{port}")))
+    }
+
+    /// Blocks until something listens on the server's port.
+    pub(crate) fn wait_for_server(base_url: &str) -> Result<()> {
+        let address = base_url.trim_start_matches("http://");
+        let started = Instant::now();
+        while std::net::TcpStream::connect(address).is_err() {
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(60),
+                "the Jupyter server didn't start"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
+    }
+
 }

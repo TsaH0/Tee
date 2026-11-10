@@ -2878,6 +2878,12 @@
     //    "python": "conda-base"
     //    "typescript": "deno"
     // }
+    // Remote Jupyter servers, such as a Google Colab runtime, whose kernels
+    // appear in the kernel picker. `repl: connect to jupyter server` adds one.
+    // "servers": [
+    //   { "name": "Colab", "url": "https://example.trycloudflare.com/?token=abc" }
+    // ]
+    "servers": [],
   },
   // REPL settings.
   "repl": {
