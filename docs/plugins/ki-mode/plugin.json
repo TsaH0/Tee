@@ -1,0 +1,17 @@
+{
+  "name": "ki-mode",
+  "description": "A selection-first modal mode in the style of the Ki editor",
+  "run": ["python3", "ki_mode.py"],
+  "keymap": "keymap.json",
+  "commands": [
+    { "name": "enter", "description": "Start Ki mode", "vim": "Ki" },
+    { "name": "leave", "description": "Leave Ki mode" },
+    { "name": "unit", "description": "Choose what Ki mode selects: char, word or line" },
+    { "name": "next", "description": "Select the next unit" },
+    { "name": "previous", "description": "Select the previous unit" },
+    { "name": "extend_next", "description": "Extend the selection by the next unit" },
+    { "name": "delete", "description": "Delete the selection" },
+    { "name": "insert_before", "description": "Insert before the selection" },
+    { "name": "insert_after", "description": "Insert after the selection" }
+  ]
+}

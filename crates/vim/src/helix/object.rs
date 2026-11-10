@@ -191,6 +191,53 @@ mod test {
     }
 
     #[gpui::test]
+    async fn test_vim_text_objects_setting(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // Helix finds the closest pair even when the cursor isn't in one.
+        cx.set_state("ˇa (b) c", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i (");
+        cx.assert_state("a («bˇ») c", Mode::HelixNormal);
+
+        // Helix's `m a "` stops at the closing quote.
+        cx.set_state("x \"foo ˇbar\" y", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a \"");
+        cx.assert_state("x «\"foo bar\"ˇ» y", Mode::HelixNormal);
+
+        cx.update(|_, cx| {
+            gpui::UpdateGlobal::update_global(cx, |store: &mut settings::SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.vim.get_or_insert_default().helix_text_objects =
+                        Some(settings::HelixTextObjectsContent::Vim);
+                });
+            });
+        });
+
+        // Like Neovim's `i(`, a pair later on the line is found.
+        cx.set_state("ˇa (b) c", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i (");
+        cx.assert_state("a («bˇ») c", Mode::HelixNormal);
+
+        // Inside one, `m i` and `m a` select like `i(` and `a(`.
+        cx.set_state("x (foo ˇbar) y", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i (");
+        cx.assert_state("x («foo barˇ») y", Mode::HelixNormal);
+        cx.set_state("x (foo ˇbar) y", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a (");
+        cx.assert_state("x «(foo bar)ˇ» y", Mode::HelixNormal);
+
+        // Vim's `a"` also takes the space after the closing quote.
+        cx.set_state("x \"foo ˇbar\" y", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a \"");
+        cx.assert_state("x «\"foo bar\" ˇ»y", Mode::HelixNormal);
+
+        // `m a w` takes the space after the word, like `aw`.
+        cx.set_state("one twˇo three", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a w");
+        cx.assert_state("one «two ˇ»three", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
     async fn test_select_any_pair_object(cx: &mut gpui::TestAppContext) {
         let mut cx = VimTestContext::new(cx, true).await;
 

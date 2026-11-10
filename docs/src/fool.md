@@ -23,8 +23,11 @@ Put each plugin in its own folder under `~/.config/zed/plugins/` with a
   "run": ["python3", "hello.py"],
   // "on_command" (default) starts it when one of its commands is first used.
   "start": "on_command",
-  // Editor events to receive: "saved" and "opened".
+  // Editor events to receive: "saved", "opened", "edited",
+  // "selection_changed" and "focused".
   "events": ["saved"],
+  // Key bindings that load with the plugin, in keymap.json format.
+  "keymap": "keymap.json",
   "commands": [
     // `vim` makes it an ex command: `:Hello world` in Vim and Helix modes.
     { "name": "greet", "description": "Say hello", "vim": "Hello" },
@@ -62,25 +65,68 @@ The editor sends:
 
 | Message | Fields |
 |---------|--------|
-| `initialize` | `protocol_version` (1), `editor` ("fool"), `plugin_dir`, `config_dir` |
-| `command` | `id`, `command`, `args` (text after the ex command), `context` |
-| `event` | `event` ("saved" or "opened"), `data.file` |
+| `initialize` | `protocol_version` (2), `editor` ("fool"), `plugin_dir`, `config_dir` |
+| `command` | `id`, `command`, `args` (text after the ex command, or from the binding), `context` |
+| `event` | `event`, `data.file` |
+| `response` | `id`, and `result` or `error`, answering a request that had an `id` |
 
-`context` has `file`, `language`, `worktrees`, `cursor` and `selections` (lines
-and columns start at 1, and each selection has its `text`), plus `text` for
-commands with `wants_text`.
+Events are only sent to plugins that list them under `events` in
+`plugin.json`: `saved`, `opened`, `edited`, `selection_changed` and `focused`.
 
-The plugin can send these at any time, not only in reply to a command, so a
-plugin can also run its own servers or watchers:
+`context` (also the result of `get_editor`) has `file`, `language`, `cursor`,
+`selections` (each with `start`, `end` and `text`; `end` is where the cursor
+is), `mode`, `line_count` and `worktrees`, plus `text` when asked for. Lines and
+columns start at 1, and columns count characters, not bytes.
 
-| Request | Fields | Effect |
-|---------|--------|--------|
+A plugin can send these requests at any time, not only in reply to a command,
+so it can also run its own servers or watchers. Give a request an `id` to get a
+`response` with its result; without one, errors show as notifications. While a
+plugin waits for a response, commands and events can still arrive, so keep
+them to handle afterwards (as `docs/plugins/ki-mode` does).
+
+| Request | Fields | Effect and result |
+|---------|--------|-------------------|
+| `get_editor` | `text` (bool) | The active editor's `context`, or `null` |
+| `get_text` | `start`, `end` (optional positions) | The text |
+| `set_selections` | `selections`: `[{start, end}]` | Selects; `end` before `start` selects backwards |
+| `edit` | `edits`: `[{start, end, text}]` | Replaces the ranges as one undoable edit |
+| `insert` | `text` | Replaces the selections (or inserts at the cursors) |
+| `set_text` | `text` | Replaces the whole text |
+| `set_mode` | `mode` (string or `null`), `cursor` (`block`, `bar`, `underline`, `hollow`) | Gives the active editor a mode that key bindings can match with `fool_mode == <mode>` |
+| `bind_keys` | `keymap` (`keymap.json` format) | Adds key bindings |
+| `dispatch` | `action`, `args` | Runs any action, such as `"editor::SelectAll"` or `"vim::SwitchToInsertMode"` |
+| `get_actions` | | The names of every action |
+| `set_status` | `text` (string or `null`) | Shows text in the status bar |
+| `pick` | `items`, `placeholder` | Asks the user to pick an item; the result is its index, or `null` |
+| `prompt` | `placeholder` | Asks the user to type; the result is the text, or `null` |
 | `notify` | `message`, `level` ("info" or "error") | Shows a notification |
 | `open` | `path`, `line`, `column` | Opens a file, optionally at a position |
 | `show` | `title`, `text`, `language` | Shows text in a read-only tab, replacing an earlier `show` with the same title |
-| `insert` | `text` | Replaces the selections of the active editor (or inserts at the cursors) |
-| `set_text` | `text` | Replaces the whole text of the active editor |
-| `dispatch` | `action`, `args` | Runs any action, e.g. `"editor::SelectAll"` or `"workspace::NewTerminal"` |
+| `get_settings` | | Your `settings.json` |
+| `update_settings` | `settings` | Merges into `settings.json`, for anything settings control |
+| `get_diagnostics` | | The active editor's diagnostics: `start`, `end`, `severity`, `message`, `source` |
+
+### What plugins can change
+
+- **New modal keymaps**: `set_mode` plus key bindings in a `fool_mode == <mode>`
+  context make a whole new editing model. Plugin bindings load after the
+  built-in Vim and Helix keys, so they win while the mode is on, and keys they
+  don't bind keep working. `docs/plugins/ki-mode` is a selection-first mode in
+  the style of the [Ki editor](https://ki-editor.github.io/ki-editor/): copy it
+  to `~/.config/zed/plugins/ki-mode`, run `plugins: reload`, and press `space k`.
+- **Text objects and motions**: read the text, compute ranges in any language,
+  and `set_selections`, bound to keys like built-in objects.
+- **The UI**: `set_status`, `pick`, `prompt` and `show`, plus every action,
+  including those that open, close and move panels and docks (`dispatch`), and
+  every UI setting (`update_settings`, such as `"tab_bar"`, `"toolbar"` or
+  `"theme"`).
+- **Language servers**: `update_settings` with `"lsp"` and `"languages"`
+  configures which servers run and how; `get_diagnostics` reads their results,
+  and actions such as `editor::GoToDefinition`, `editor::Hover` and
+  `editor::Format` drive them.
+
+A plugin's `keymap` file (named in `plugin.json`) loads with it. Your own
+`keymap.json` loads after plugins, so it can still override any plugin binding.
 
 A complete example is in `docs/plugins/hello`. Copy it to
 `~/.config/zed/plugins/hello` to try it.
@@ -111,6 +157,14 @@ These are configured under `vim.plugins` in `settings.json`:
   or until you ask for completions. Keys use keymap syntax, such as `"ctrl-k"`.
 - **substitute_preview**: while you type `:s` or `:%s`, every match in range is
   highlighted and struck through, with its replacement shown in green after it.
+
+Helix's `m i` and `m a` pick the closest pair. To make them work like Vim's
+`i` and `a` (where, for example, `a"` also takes the space after the quote),
+set:
+
+```json
+{ "vim": { "helix_text_objects": "vim" } }
+```
 
 ## `:substitute`
 

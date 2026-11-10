@@ -2393,6 +2393,12 @@ pub fn load_default_keymap(cx: &mut App) {
         }
     }
 
+    let mut plugin_bindings = plugin_host::plugin_key_bindings(cx);
+    for key_binding in &mut plugin_bindings {
+        key_binding.set_meta(KeybindSource::Vim.meta());
+    }
+    cx.bind_keys(filter_disabled_ai_bindings(plugin_bindings, cx));
+
     cx.bind_keys(
         KeymapFile::load_asset(
             SPECIFIC_OVERRIDES_KEYMAP_PATH,

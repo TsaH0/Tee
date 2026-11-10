@@ -2942,6 +2942,10 @@
         "enabled": true,
       },
     },
+    // How Helix's `m i` and `m a` find text objects: "helix" picks the closest
+    // pair, and "vim" follows Vim's `i` and `a` (e.g. `a(` includes the
+    // parentheses and `aw` the space after the word).
+    "helix_text_objects": "helix",
     // Which modal keymaps are loaded.
     "keymap": {
       // Set to false to drop the built-in Vim and Helix bindings and define your

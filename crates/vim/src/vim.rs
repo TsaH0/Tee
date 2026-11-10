@@ -2401,6 +2401,7 @@ struct VimSettings {
     pub highlight_on_yank_duration: u64,
     pub cursor_shape: CursorShapeSettings,
     pub show_edit_predictions_in_normal_mode: bool,
+    pub helix_text_objects: settings::HelixTextObjectsContent,
 }
 
 /// Cursor shape configuration for insert mode.
@@ -2489,6 +2490,7 @@ impl Settings for VimSettings {
             highlight_on_yank_duration: vim.highlight_on_yank_duration.unwrap(),
             cursor_shape: vim.cursor_shape.unwrap().into(),
             show_edit_predictions_in_normal_mode: vim.show_edit_predictions_in_normal_mode.unwrap(),
+            helix_text_objects: vim.helix_text_objects.unwrap_or_default(),
         }
     }
 }

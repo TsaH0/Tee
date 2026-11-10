@@ -1,0 +1,26 @@
+[
+  {
+    // Start Ki mode from Vim or Helix normal mode.
+    "context": "Editor && VimControl && (vim_mode == normal || vim_mode == helix_normal) && !menu",
+    "bindings": {
+      "space k": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "enter" }]
+    }
+  },
+  {
+    // In Ki mode, keys act on the current selection unit. These bindings load
+    // after the built-in Vim and Helix keys, so they win while the mode is on.
+    "context": "Editor && fool_mode == ki",
+    "bindings": {
+      "c": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "unit", "args": "char" }],
+      "w": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "unit", "args": "word" }],
+      "e": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "unit", "args": "line" }],
+      "l": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "next" }],
+      "h": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "previous" }],
+      "shift-l": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "extend_next" }],
+      "d": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "delete" }],
+      "i": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "insert_before" }],
+      "a": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "insert_after" }],
+      "escape": ["plugins::RunCommand", { "plugin": "ki-mode", "command": "leave" }]
+    }
+  }
+]

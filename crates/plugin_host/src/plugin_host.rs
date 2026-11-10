@@ -5,7 +5,11 @@
 //! `plugin.json` manifest naming the program to run and the commands it
 //! provides. The program is started when one of its commands is first used
 //! (or at startup) and talks to the editor with newline-delimited JSON over
-//! stdin and stdout. See `docs/src/plugins.md` for the protocol.
+//! stdin and stdout. See `docs/src/fool.md` for the protocol.
+
+mod api;
+
+pub use api::plugin_key_bindings;
 
 use std::{
     path::{Path, PathBuf},
@@ -15,7 +19,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 use collections::HashMap;
-use editor::{Editor, MultiBufferOffset};
+use editor::Editor;
 use futures::{
     AsyncBufReadExt as _, AsyncWriteExt as _, StreamExt as _,
     channel::mpsc::{self, UnboundedSender},
@@ -23,14 +27,14 @@ use futures::{
 };
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    Action, App, AppContext as _, Context, DismissEvent, Entity, Global, Subscription, Task,
+    Action, App, AppContext as _, Context, DismissEvent, Entity, Global, Task,
     WeakEntity, Window, actions,
 };
-use language::{Buffer, Capability, Point};
+use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
 use picker::{Picker, PickerDelegate};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use smol::process::{Child, Command};
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, Toggleable, prelude::*, rems};
@@ -40,7 +44,7 @@ use workspace::{
     notifications::{NotificationId, show_app_notification},
 };
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 
 actions!(
     plugins,
@@ -88,9 +92,14 @@ struct Manifest {
     start: StartWhen,
     #[serde(default)]
     commands: Vec<ManifestCommand>,
-    /// Editor events to send: "saved" and "opened".
+    /// Editor events to send: "saved", "opened", "edited",
+    /// "selection_changed" and "focused".
     #[serde(default)]
     events: Vec<String>,
+    /// A file in `keymap.json` format, relative to the plugin's directory,
+    /// whose bindings load with the plugin.
+    #[serde(default)]
+    keymap: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -119,13 +128,17 @@ struct RunningPlugin {
     _tasks: Vec<Task<()>>,
 }
 
-#[derive(Default)]
 struct PluginHost {
+    dir: PathBuf,
     plugins: Vec<Plugin>,
     /// Read-only buffers plugins show text in, by plugin and title.
     shown_buffers: HashMap<(String, String), WeakEntity<Buffer>>,
     next_request_id: u64,
-    _editor_subscriptions: Vec<Subscription>,
+    /// Key bindings in `keymap.json` format, by plugin.
+    keymaps: Vec<(String, String)>,
+    /// Status bar texts, by plugin.
+    statuses: std::collections::BTreeMap<String, String>,
+    status_items: Vec<WeakEntity<api::PluginStatusItem>>,
 }
 
 impl Global for PluginHost {}
@@ -135,20 +148,47 @@ pub fn plugins_dir() -> PathBuf {
 }
 
 pub fn init(cx: &mut App) {
-    cx.set_global(PluginHost::default());
+    init_with_dir(plugins_dir(), cx);
+}
+
+/// Like [`init`], loading plugins from `dir`.
+pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
+    cx.set_global(PluginHost {
+        dir,
+        plugins: Vec::new(),
+        shown_buffers: HashMap::default(),
+        next_request_id: 0,
+        keymaps: Vec::new(),
+        statuses: Default::default(),
+        status_items: Vec::new(),
+    });
     load_plugins(cx);
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
+    cx.observe_new(|workspace: &mut Workspace, window, cx| {
+        if let Some(window) = window {
+            let item = cx.new(|_| api::PluginStatusItem);
+            cx.global_mut::<PluginHost>()
+                .status_items
+                .push(api::status_item_handle(&item));
+            workspace.status_bar().update(cx, |status_bar, cx| {
+                status_bar.add_right_item(item, window, cx);
+            });
+        }
         workspace
             .register_action(|workspace, _: &OpenCommandPicker, window, cx| {
                 open_command_picker(workspace, window, cx);
             })
             .register_action(|_, _: &Reload, _, cx| {
                 load_plugins(cx);
-                let count = cx.global::<PluginHost>().plugins.len();
-                notify(format!("Loaded {count} plugin(s) from {}", plugins_dir().display()), false, cx);
+                let host = cx.global::<PluginHost>();
+                let message = format!(
+                    "Loaded {} plugin(s) from {}",
+                    host.plugins.len(),
+                    host.dir.display()
+                );
+                notify(message, false, cx);
             })
             .register_action(|workspace, _: &OpenPluginsFolder, window, cx| {
-                let dir = plugins_dir();
+                let dir = cx.global::<PluginHost>().dir.clone();
                 if let Err(error) = std::fs::create_dir_all(&dir) {
                     notify(format!("Failed to create {}: {error}", dir.display()), true, cx);
                     return;
@@ -164,9 +204,14 @@ pub fn init(cx: &mut App) {
     .detach();
     cx.observe_new(|editor: &mut Editor, _, cx| {
         cx.subscribe(&cx.entity(), |editor, _, event: &editor::EditorEvent, cx| {
-            if matches!(event, editor::EditorEvent::Saved) {
-                send_event("saved", editor, cx);
-            }
+            let event = match event {
+                editor::EditorEvent::Saved => "saved",
+                editor::EditorEvent::Edited { .. } => "edited",
+                editor::EditorEvent::SelectionsChanged { local: true } => "selection_changed",
+                editor::EditorEvent::Focused => "focused",
+                _ => return,
+            };
+            send_event(event, editor, cx);
         })
         .detach();
         if let Some(path) = editor_path(editor, cx)
@@ -178,7 +223,7 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-fn notify(message: String, is_error: bool, cx: &mut App) {
+pub(crate) fn notify(message: String, is_error: bool, cx: &mut App) {
     struct PluginNotification;
     if is_error {
         log::error!("plugins: {message}");
@@ -223,8 +268,28 @@ fn read_manifests(dir: &Path) -> Vec<(Manifest, PathBuf)> {
 }
 
 fn load_plugins(cx: &mut App) {
-    let manifests = read_manifests(&plugins_dir());
+    let manifests = read_manifests(&cx.global::<PluginHost>().dir);
+    let mut keymaps = Vec::new();
+    for (manifest, dir) in &manifests {
+        let Some(keymap) = &manifest.keymap else {
+            continue;
+        };
+        let path = dir.join(keymap);
+        match std::fs::read_to_string(&path) {
+            Ok(source) => keymaps.push((manifest.name.clone(), source)),
+            Err(error) => log::error!("plugins: failed to read {}: {error}", path.display()),
+        }
+    }
+    let mut bindings = Vec::new();
+    for (plugin, source) in &keymaps {
+        match api::parse_keymap(source, cx) {
+            Ok(plugin_bindings) => bindings.extend(plugin_bindings),
+            Err(error) => notify(format!("{plugin}'s key bindings: {error:#}"), true, cx),
+        }
+    }
+    cx.bind_keys(bindings);
     let host = cx.global_mut::<PluginHost>();
+    host.keymaps = keymaps;
     // Dropping the running plugins kills their processes.
     host.plugins = manifests
         .into_iter()
@@ -366,55 +431,10 @@ fn plugin_exited(name: &str, cx: &mut App) {
     log::info!("plugins: {name} exited");
 }
 
-fn editor_path(editor: &Editor, cx: &App) -> Option<PathBuf> {
+pub(crate) fn editor_path(editor: &Editor, cx: &App) -> Option<PathBuf> {
     let buffer = editor.buffer().read(cx).as_singleton()?;
     let file = buffer.read(cx).file()?.as_local()?;
     Some(file.abs_path(cx))
-}
-
-fn position(point: Point) -> Value {
-    json!({ "line": point.row + 1, "column": point.column + 1 })
-}
-
-/// What a command knows about the editor it was run from.
-fn editor_context(editor: &Entity<Editor>, wants_text: bool, cx: &mut App) -> Value {
-    editor.update(cx, |editor, cx| context_of(editor, wants_text, cx))
-}
-
-fn context_of(editor: &mut Editor, wants_text: bool, cx: &mut Context<Editor>) -> Value {
-    let snapshot = editor.buffer().read(cx).snapshot(cx);
-    let display_snapshot = editor.display_snapshot(cx);
-    let selections = editor
-        .selections
-        .all::<Point>(&display_snapshot)
-        .into_iter()
-        .map(|selection| {
-            json!({
-                "start": position(selection.start),
-                "end": position(selection.end),
-                "text": snapshot.text_for_range(selection.start..selection.end).collect::<String>(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let cursor = editor
-        .selections
-        .newest::<Point>(&display_snapshot)
-        .head();
-    let language = editor
-        .buffer()
-        .read(cx)
-        .as_singleton()
-        .and_then(|buffer| buffer.read(cx).language().map(|language| language.name().to_string()));
-    let mut context = json!({
-        "file": editor_path(editor, cx),
-        "language": language,
-        "cursor": position(cursor),
-        "selections": selections,
-    });
-    if wants_text {
-        context["text"] = Value::String(snapshot.text());
-    }
-    context
 }
 
 fn run_command(
@@ -449,7 +469,9 @@ fn run_command(
     };
     let mut context = workspace
         .active_item_as::<Editor>(cx)
-        .map(|editor| editor_context(&editor, command.wants_text, cx))
+        .map(|editor| {
+            editor.update(cx, |editor, cx| api::editor_context(editor, command.wants_text, cx))
+        })
         .unwrap_or_else(|| json!({}));
     context["worktrees"] = Value::Array(
         workspace
@@ -484,6 +506,21 @@ fn send_event(event: &str, editor: &Editor, cx: &mut App) {
     broadcast_event(event, json!({ "file": path }), cx);
 }
 
+/// Sends a message to a running plugin.
+pub(crate) fn send_to_plugin(plugin: &str, message: String, cx: &App) {
+    let Some(host) = cx.try_global::<PluginHost>() else {
+        return;
+    };
+    if let Some(running) = host
+        .plugins
+        .iter()
+        .find(|candidate| candidate.manifest.name == plugin)
+        .and_then(|plugin| plugin.running.as_ref())
+    {
+        running.messages.unbounded_send(message).ok();
+    }
+}
+
 /// Sends an event to the running plugins that asked for it in their manifest.
 fn broadcast_event(event: &str, data: Value, cx: &mut App) {
     let Some(host) = cx.try_global::<PluginHost>() else {
@@ -499,66 +536,47 @@ fn broadcast_event(event: &str, data: Value, cx: &mut App) {
     }
 }
 
-/// Requests a plugin can send.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum PluginRequest {
-    /// Shows a notification.
-    Notify {
-        message: String,
-        #[serde(default)]
-        level: Option<String>,
-    },
-    /// Opens a file, optionally at a 1-based line and column.
-    Open {
-        path: PathBuf,
-        #[serde(default)]
-        line: Option<u32>,
-        #[serde(default)]
-        column: Option<u32>,
-    },
-    /// Shows text in a read-only tab, replacing what an earlier `show` with
-    /// the same title showed.
-    Show {
-        title: String,
-        text: String,
-        #[serde(default)]
-        language: Option<String>,
-    },
-    /// Replaces every selection (or inserts at every cursor) in the active
-    /// editor.
-    Insert { text: String },
-    /// Replaces the whole text of the active editor.
-    SetText { text: String },
-    /// Dispatches any action by name, like a key binding would.
-    Dispatch {
-        action: String,
-        #[serde(default)]
-        args: Option<Value>,
-    },
+/// A request from a plugin, with the `id` its response goes back with.
+#[derive(Deserialize)]
+struct Envelope {
+    #[serde(default)]
+    id: Option<Value>,
+    #[serde(flatten)]
+    request: api::PluginRequest,
 }
 
 fn handle_plugin_message(plugin: &str, line: &str, cx: &mut App) {
-    let request = match serde_json::from_str::<PluginRequest>(line) {
-        Ok(request) => request,
+    let id = serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|value| value.get("id").cloned());
+    let envelope = match serde_json::from_str::<Envelope>(line) {
+        Ok(envelope) => envelope,
         Err(error) => {
             log::error!("plugins: {plugin} sent an invalid message ({error}): {line}");
+            api::Responder {
+                plugin: plugin.to_string(),
+                id,
+            }
+            .respond(Err(anyhow!("invalid request: {error}")), cx);
             return;
         }
     };
-    if let PluginRequest::Notify { message, level } = &request {
+    let responder = api::Responder {
+        plugin: plugin.to_string(),
+        id: envelope.id,
+    };
+    if let api::PluginRequest::Notify { message, level } = &envelope.request {
         notify(
             format!("{plugin}: {message}"),
             level.as_deref() == Some("error"),
             cx,
         );
+        responder.respond(Ok(Value::Null), cx);
         return;
     }
-    let plugin = plugin.to_string();
+    let request = envelope.request;
     with_any_workspace(cx, move |workspace, window, cx| {
-        if let Err(error) = apply_request(&plugin, request, workspace, window, cx) {
-            notify(format!("{plugin}: {error:#}"), true, cx);
-        }
+        api::apply_request(request, responder, workspace, window, cx);
     });
 }
 
@@ -588,70 +606,7 @@ fn with_any_workspace(
     });
 }
 
-fn apply_request(
-    plugin: &str,
-    request: PluginRequest,
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) -> Result<()> {
-    match request {
-        PluginRequest::Notify { .. } => {}
-        PluginRequest::Open { path, line, column } => {
-            let open = workspace.open_abs_path(path, OpenOptions::default(), window, cx);
-            cx.spawn_in(window, async move |_, cx| {
-                let item = open.await?;
-                if let Some(line) = line
-                    && let Some(editor) = cx.update(|_, cx| item.act_as::<Editor>(cx))?
-                {
-                    let point = Point::new(
-                        line.saturating_sub(1),
-                        column.unwrap_or(1).saturating_sub(1),
-                    );
-                    editor.update_in(cx, |editor, window, cx| {
-                        editor.change_selections(Default::default(), window, cx, |selections| {
-                            selections.select_ranges([point..point])
-                        });
-                    })?;
-                }
-                anyhow::Ok(())
-            })
-            .detach_and_log_err(cx);
-        }
-        PluginRequest::Show {
-            title,
-            text,
-            language,
-        } => show_text(plugin, title, text, language, workspace, window, cx),
-        PluginRequest::Insert { text } => {
-            let editor = workspace
-                .active_item_as::<Editor>(cx)
-                .context("no editor is active")?;
-            editor.update(cx, |editor, cx| editor.insert(&text, window, cx));
-        }
-        PluginRequest::SetText { text } => {
-            let editor = workspace
-                .active_item_as::<Editor>(cx)
-                .context("no editor is active")?;
-            editor.update(cx, |editor, cx| {
-                let end = editor.buffer().read(cx).snapshot(cx).len();
-                editor.change_selections(Default::default(), window, cx, |selections| {
-                    selections.select_ranges([MultiBufferOffset(0)..end])
-                });
-                editor.insert(&text, window, cx);
-            });
-        }
-        PluginRequest::Dispatch { action, args } => {
-            let action = cx
-                .build_action(&action, args)
-                .map_err(|error| anyhow!("{error}"))?;
-            window.dispatch_action(action, cx);
-        }
-    }
-    Ok(())
-}
-
-fn show_text(
+pub(crate) fn show_text(
     plugin: &str,
     title: String,
     text: String,
@@ -916,6 +871,7 @@ impl PickerDelegate for CommandPickerDelegate {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::api::PluginRequest;
 
     #[test]
     fn test_manifests_and_requests_parse() -> Result<()> {
@@ -943,5 +899,361 @@ mod test {
         )?;
         assert!(matches!(request, PluginRequest::Dispatch { .. }));
         Ok(())
+    }
+
+    const PROBE_PLUGIN: &str = r#"
+import json, sys
+
+next_id = 0
+def request(message):
+    global next_id
+    next_id += 1
+    message["id"] = next_id
+    print(json.dumps(message), flush=True)
+    for line in sys.stdin:
+        reply = json.loads(line)
+        if reply.get("type") == "response" and reply.get("id") == next_id:
+            return reply
+    raise SystemExit("the editor closed")
+
+def check(results):
+    errors = []
+    text = request({"type": "get_text"})["result"]
+    if text != "hello wörld\nsecond line\n":
+        errors.append(f"get_text gave {text!r}")
+    # Columns count characters, so `ö` is one column.
+    request({"type": "edit", "edits": [
+        {"start": {"line": 1, "column": 7}, "end": {"line": 1, "column": 12}, "text": "there"}]})
+    request({"type": "set_selections", "selections": [
+        {"start": {"line": 2, "column": 1}, "end": {"line": 2, "column": 7}}]})
+    request({"type": "set_mode", "mode": "probe", "cursor": "block"})
+    request({"type": "set_status", "text": "probe ready"})
+    editor = request({"type": "get_editor"})["result"]
+    if editor["mode"] != "probe":
+        errors.append(f"mode is {editor['mode']!r}")
+    if editor["selections"][0]["text"] != "second":
+        errors.append(f"selection is {editor['selections'][0]!r}")
+    request({"type": "bind_keys", "keymap": [
+        {"context": "Editor", "bindings": {"ctrl-alt-q": "editor::SelectAll"}}]})
+    bad = request({"type": "set_mode", "mode": "x", "cursor": "triangle"})
+    if "error" not in bad:
+        errors.append("an invalid cursor should be an error")
+    actions = request({"type": "get_actions"})["result"]
+    if "editor::SelectAll" not in actions:
+        errors.append("get_actions is missing editor::SelectAll")
+    settings = request({"type": "get_settings"})["result"]
+    if not isinstance(settings, dict):
+        errors.append(f"get_settings gave {settings!r}")
+    with open("result.json", "w") as result:
+        json.dump(errors, result)
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("type") == "command" and message["command"] == "go":
+        check(message)
+"#;
+
+    /// Runs a real plugin that uses the request API on an editor, and checks
+    /// what it did.
+    #[gpui::test]
+    async fn test_plugin_api(cx: &mut gpui::TestAppContext) {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 isn't installed");
+            return;
+        }
+        let plugins = tempfile::tempdir().expect("a temporary directory");
+        let plugin_dir = plugins.path().join("probe");
+        std::fs::create_dir_all(&plugin_dir).expect("the plugin directory");
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name": "probe", "run": ["python3", "probe.py"],
+                "commands": [{"name": "go"}], "keymap": "keymap.json"}"#,
+        )
+        .expect("the manifest");
+        std::fs::write(plugin_dir.join("probe.py"), PROBE_PLUGIN).expect("the plugin");
+        std::fs::write(
+            plugin_dir.join("keymap.json"),
+            r#"[{"context": "Editor && fool_mode == probe",
+                 "bindings": {"ctrl-alt-p": ["plugins::RunCommand", {"plugin": "probe", "command": "go"}]}}]"#,
+        )
+        .expect("the keymap");
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            json!({ "a.txt": "hello wörld\nsecond line\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the workspace");
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| init_with_dir(plugins.path().to_path_buf(), cx));
+
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(util::path!("/project/a.txt")),
+                    OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the file should open")
+            .downcast::<Editor>()
+            .expect("the file should open in an editor");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            run_command(
+                workspace,
+                &RunCommand {
+                    plugin: "probe".into(),
+                    command: "go".into(),
+                    args: None,
+                },
+                window,
+                cx,
+            )
+        });
+
+        let result_path = plugin_dir.join("result.json");
+        let started = std::time::Instant::now();
+        while !result_path.exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "the plugin didn't finish"
+            );
+            let (sender, receiver) = futures::channel::oneshot::channel::<()>();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                sender.send(()).ok();
+            });
+            receiver.await.ok();
+        }
+        let errors: Vec<String> = serde_json::from_str(
+            &std::fs::read_to_string(&result_path).expect("the plugin's result"),
+        )
+        .expect("the plugin's result should be JSON");
+        assert!(errors.is_empty(), "the plugin saw: {errors:?}");
+
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.text(cx), "hello there\nsecond line\n");
+            let mode = editor
+                .addon::<api::PluginModeAddon>()
+                .and_then(|addon| addon.mode.clone());
+            assert_eq!(mode.as_deref(), Some("probe"));
+        });
+        cx.update(|_, cx| {
+            let host = cx.global::<PluginHost>();
+            assert_eq!(
+                host.statuses.get("probe").map(String::as_str),
+                Some("probe ready")
+            );
+            // The manifest's keymap and the `bind_keys` request.
+            assert_eq!(host.keymaps.len(), 2);
+            let bindings = plugin_key_bindings(cx);
+            assert!(bindings.iter().any(|binding| {
+                binding.action().name() == "plugins::RunCommand"
+                    && binding.predicate().is_some_and(|predicate| {
+                        predicate.to_string().contains("fool_mode == probe")
+                    })
+            }));
+            assert!(bindings
+                .iter()
+                .any(|binding| binding.action().name() == "editor::SelectAll"));
+        });
+    }
+
+    /// Resolves after `duration` of real time, for waiting on a plugin.
+    async fn sleep(duration: std::time::Duration) {
+        let (sender, receiver) = futures::channel::oneshot::channel::<()>();
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            sender.send(()).ok();
+        });
+        receiver.await.ok();
+    }
+
+    /// The example plugins in `docs/plugins` load, and Ki mode drives an
+    /// editor through its commands.
+    #[gpui::test]
+    async fn test_example_ki_mode_plugin(cx: &mut gpui::TestAppContext) {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 isn't installed");
+            return;
+        }
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugins");
+        let unit_tests = std::process::Command::new("python3")
+            .args(["-m", "unittest", "test_ki_mode"])
+            .current_dir(examples.join("ki-mode"))
+            .output()
+            .expect("python3 should run");
+        assert!(
+            unit_tests.status.success(),
+            "the Ki mode plugin's tests failed: {}",
+            String::from_utf8_lossy(&unit_tests.stderr)
+        );
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            json!({ "a.py": "let total = price * 2\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the workspace");
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| init_with_dir(examples.clone(), cx));
+        cx.update(|_, cx| {
+            let host = cx.global::<PluginHost>();
+            let names = host
+                .plugins
+                .iter()
+                .map(|plugin| plugin.manifest.name.as_str())
+                .collect::<Vec<_>>();
+            assert!(names.contains(&"ki-mode") && names.contains(&"hello"), "{names:?}");
+            let ki_bindings = plugin_key_bindings(cx)
+                .into_iter()
+                .filter(|binding| binding.action().name() == "plugins::RunCommand")
+                .count();
+            assert_eq!(ki_bindings, 11, "every Ki mode binding should load");
+        });
+
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(util::path!("/project/a.py")),
+                    OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the file should open")
+            .downcast::<Editor>()
+            .expect("the file should open in an editor");
+
+        let run = |command: &str, args: Option<&str>, cx: &mut gpui::VisualTestContext| {
+            let action = RunCommand {
+                plugin: "ki-mode".into(),
+                command: command.into(),
+                args: args.map(str::to_string),
+            };
+            workspace.update_in(cx, |workspace, window, cx| {
+                run_command(workspace, &action, window, cx)
+            });
+        };
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            editor.update(cx, |editor, cx| {
+                let display_snapshot = editor.display_snapshot(cx);
+                let selection = editor
+                    .selections
+                    .newest::<language::Point>(&display_snapshot);
+                editor
+                    .buffer()
+                    .read(cx)
+                    .snapshot(cx)
+                    .text_for_range(selection.start..selection.end)
+                    .collect::<String>()
+            })
+        };
+        async fn wait_until(
+            cx: &mut gpui::VisualTestContext,
+            mut condition: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+            what: &str,
+        ) {
+            let started = std::time::Instant::now();
+            while !condition(cx) {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(60),
+                    "timed out waiting for {what}"
+                );
+                sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        run("enter", None, cx);
+        wait_until(cx, |cx| selected(cx) == "let", "Ki mode to select the first word").await;
+        editor.update(cx, |editor, _| {
+            let mode = editor
+                .addon::<api::PluginModeAddon>()
+                .and_then(|addon| addon.mode.clone());
+            assert_eq!(mode.as_deref(), Some("ki"));
+        });
+        // Ki mode's keys resolve in the editor's real key context.
+        let ki_key = editor.update_in(cx, |editor, window, cx| {
+            let key_context = editor.key_context(window, cx);
+            assert_eq!(key_context.get("fool_mode").map(|mode| mode.as_ref()), Some("ki"));
+            let keystroke = gpui::Keystroke::parse_with_os("l", gpui::OperatingSystem::Linux)
+                .expect("a keystroke");
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let (bindings, _) = keymap.bindings_for_input(&[keystroke], &[key_context]);
+            bindings
+                .first()
+                .and_then(|binding| binding.action().as_any().downcast_ref::<RunCommand>().cloned())
+        });
+        assert_eq!(
+            ki_key.map(|action| action.command).as_deref(),
+            Some("next"),
+            "`l` should select the next unit in Ki mode"
+        );
+
+        run("next", None, cx);
+        wait_until(cx, |cx| selected(cx) == "total", "the next word").await;
+        run("extend_next", None, cx);
+        wait_until(cx, |cx| selected(cx) == "total =", "extending the selection").await;
+        run("delete", None, cx);
+        wait_until(
+            cx,
+            |cx| editor.update(cx, |editor, cx| editor.text(cx)) == "let  price * 2\n",
+            "deleting the selection",
+        )
+        .await;
+        run("unit", Some("line"), cx);
+        wait_until(cx, |cx| selected(cx) == "let  price * 2", "selecting the line").await;
+        run("leave", None, cx);
+        wait_until(
+            cx,
+            |cx| {
+                editor.update(cx, |editor, _| {
+                    editor
+                        .addon::<api::PluginModeAddon>()
+                        .is_some_and(|addon| addon.mode.is_none())
+                })
+            },
+            "leaving Ki mode",
+        )
+        .await;
     }
 }
