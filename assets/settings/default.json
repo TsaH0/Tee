@@ -2866,6 +2866,81 @@
       // Set to "inherit" to use the editor's cursor_shape.
       "insert": "inherit",
     },
+    // Built-in plugins that change how Vim and Helix modes behave.
+    "plugins": {
+      // After `f`, `F`, `t` or `T`, label the other visible occurrences of the
+      // character. Typing a label jumps there; any other key removes the labels.
+      "flash_find": {
+        "enabled": true,
+        "labels": "asdfgqwertyuiopzxcvbnm",
+      },
+      // Hide the completions menu when one of these keys is typed. The key still
+      // does what it normally does, and the menu stays hidden for the rest of the
+      // word. Keys use keymap syntax, e.g. "j" or "ctrl-k".
+      "completion_dismiss": {
+        "enabled": true,
+        "keys": ["j", "k"],
+      },
+      // Highlight the matches of `:s` and show their replacements while typing it.
+      "substitute_preview": {
+        "enabled": true,
+      },
+    },
+    // Which modal keymaps are loaded.
+    "keymap": {
+      // Set to false to drop the built-in Vim and Helix bindings and define your
+      // own modal keymap from scratch.
+      "load_builtin": true,
+      // Extra keymap files, in keymap.json format, loaded after the built-in
+      // modal keymap and before your keymap.json. Relative paths are relative
+      // to the config directory.
+      "files": [],
+    },
+  },
+  // The competitive programming plugin: receives problems from Competitive
+  // Companion and runs their tests. Its commands are under `cp:` in the command
+  // palette, and `:Cp` in Vim and Helix modes. The workspace layout matches cptui.
+  "competitive_programming": {
+    // Directory that problems are saved in.
+    "workspace": "~/cp",
+    // Address and port of the Competitive Companion receiver.
+    "host": "127.0.0.1",
+    "port": 27121,
+    // Whether to start the receiver when Zed starts.
+    "autostart": false,
+    // Whether to open a problem's source file when it is received.
+    "open_on_receive": true,
+    // Source file created for a new problem.
+    "source": "main.cpp",
+    // File whose contents new source files start with. Null uses a small C++ template.
+    "template_file": null,
+    // Used when a problem has no time limit.
+    "default_timeout_ms": 2000,
+    // Tests time out after the problem's time limit times this.
+    "timeout_multiplier": 1.5,
+    // How to compile and run sources, by extension. $(FNAME) is the source,
+    // $(BIN) the binary and $(DIR) the problem directory.
+    "languages": {
+      "cpp": {
+        "compile": ["g++", "-std=c++20", "-O2", "-Wall", "-Wextra", "-Wshadow", "-DLOCAL", "$(FNAME)", "-o", "$(BIN)"],
+        "run": ["$(BIN)"],
+      },
+      "c": {
+        "compile": ["gcc", "-std=c17", "-O2", "-Wall", "-DLOCAL", "$(FNAME)", "-o", "$(BIN)", "-lm"],
+        "run": ["$(BIN)"],
+      },
+      "rs": {
+        "compile": ["rustc", "-O", "--edition", "2021", "$(FNAME)", "-o", "$(BIN)"],
+        "run": ["$(BIN)"],
+      },
+      "py": {
+        "run": ["python3", "$(FNAME)"],
+      },
+      "java": {
+        "compile": ["javac", "-d", "$(BIN).d", "$(FNAME)"],
+        "run": ["java", "-cp", "$(BIN).d", "Main"],
+      },
+    },
   },
   // Which-key popup settings
   "which_key": {

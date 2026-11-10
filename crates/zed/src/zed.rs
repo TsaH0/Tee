@@ -2140,12 +2140,14 @@ pub fn handle_keymap_file_changes(
     let mut old_vim_enabled = VimModeSetting::get_global(cx).0;
     let mut old_helix_enabled = vim_mode_setting::HelixModeSetting::get_global(cx).0;
     let mut old_disable_ai = DisableAiSettings::get_global(cx).disable_ai;
+    let mut old_modal_keymap = vim_mode_setting::VimKeymapSetting::get_global(cx).clone();
 
     cx.observe_global::<SettingsStore>(move |cx| {
         let new_base_keymap = *BaseKeymap::get_global(cx);
         let new_vim_enabled = VimModeSetting::get_global(cx).0;
         let new_helix_enabled = vim_mode_setting::HelixModeSetting::get_global(cx).0;
         let new_disable_ai = DisableAiSettings::get_global(cx).disable_ai;
+        let new_modal_keymap = vim_mode_setting::VimKeymapSetting::get_global(cx).clone();
 
         if new_disable_ai != old_disable_ai {
             reload_menus(cx);
@@ -2155,7 +2157,9 @@ pub fn handle_keymap_file_changes(
             || new_vim_enabled != old_vim_enabled
             || new_helix_enabled != old_helix_enabled
             || new_disable_ai != old_disable_ai
+            || new_modal_keymap != old_modal_keymap
         {
+            old_modal_keymap = new_modal_keymap;
             old_base_keymap = new_base_keymap;
             old_vim_enabled = new_vim_enabled;
             old_helix_enabled = new_helix_enabled;
@@ -2364,10 +2368,16 @@ pub fn load_default_keymap(cx: &mut App) {
     }
 
     if VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0 {
-        cx.bind_keys(filter_disabled_ai_bindings(
-            KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
-            cx,
-        ));
+        let modal_keymap = vim_mode_setting::VimKeymapSetting::get_global(cx).clone();
+        if modal_keymap.load_builtin {
+            cx.bind_keys(filter_disabled_ai_bindings(
+                KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
+                cx,
+            ));
+        }
+        for file in &modal_keymap.files {
+            load_modal_keymap_file(file, cx);
+        }
     }
 
     cx.bind_keys(
@@ -2378,6 +2388,63 @@ pub fn load_default_keymap(cx: &mut App) {
         )
         .unwrap(),
     );
+}
+
+fn modal_keymap_file_path(file: &str) -> PathBuf {
+    if file == "~" {
+        return util::paths::home_dir().clone();
+    }
+    if let Some(rest) = file.strip_prefix("~/") {
+        return util::paths::home_dir().join(rest);
+    }
+    let path = PathBuf::from(file);
+    if path.is_absolute() {
+        path
+    } else {
+        paths::config_dir().join(path)
+    }
+}
+
+fn load_modal_keymap_file(file: &str, cx: &mut App) {
+    struct ModalKeymapLoadErrorNotification;
+    let notification_id = NotificationId::composite::<ModalKeymapLoadErrorNotification>(
+        SharedString::from(file.to_string()),
+    );
+
+    let path = modal_keymap_file_path(file);
+    // Keymaps are reloaded synchronously, and these files are small, so they
+    // are read on this thread rather than watched like `keymap.json`.
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            let message = format!("Failed to read modal keymap file {}: {error}", path.display());
+            log::error!("{message}");
+            show_keymap_file_load_error(notification_id, MarkdownString(message), cx);
+            return;
+        }
+    };
+
+    let mut key_bindings = match KeymapFile::load(&content, cx) {
+        KeymapFileLoadResult::Success { key_bindings } => {
+            dismiss_app_notification(&notification_id, cx);
+            key_bindings
+        }
+        KeymapFileLoadResult::SomeFailedToLoad {
+            key_bindings,
+            error_message,
+        } => {
+            show_keymap_file_load_error(notification_id, error_message, cx);
+            key_bindings
+        }
+        KeymapFileLoadResult::JsonParseFailure { error } => {
+            show_keymap_file_json_error(notification_id, &error, cx);
+            return;
+        }
+    };
+    for key_binding in &mut key_bindings {
+        key_binding.set_meta(KeybindSource::Vim.meta());
+    }
+    cx.bind_keys(filter_disabled_ai_bindings(key_bindings, cx));
 }
 
 /// Namespaces of actions that are part of an AI feature. When the user opts out

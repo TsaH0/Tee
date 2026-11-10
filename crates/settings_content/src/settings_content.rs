@@ -322,6 +322,10 @@ pub struct SettingsContent {
     /// Settings related to Vim mode in Zed.
     pub vim: Option<VimSettingsContent>,
 
+    /// Settings for the competitive programming plugin, which receives
+    /// problems from Competitive Companion and runs their tests.
+    pub competitive_programming: Option<CompetitiveProgrammingSettingsContent>,
+
     /// Number of lines to search for modelines at the beginning and end of files.
     /// Modelines contain editor directives (e.g., vim/emacs settings) that configure
     /// the editor behavior for specific files.
@@ -1085,6 +1089,81 @@ pub struct VimSettingsContent {
     /// When enabled, edit predictions are shown in Vim normal mode.
     /// By default, edit predictions are only shown in insert and replace modes.
     pub show_edit_predictions_in_normal_mode: Option<bool>,
+    /// Built-in plugins that change how Vim and Helix modes behave.
+    pub plugins: Option<VimPluginsSettingsContent>,
+    /// Which modal keymaps are loaded, so that the built-in Vim and Helix
+    /// bindings can be replaced by your own.
+    pub keymap: Option<VimKeymapSettingsContent>,
+}
+
+/// Settings for the plugins built into Vim and Helix modes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct VimPluginsSettingsContent {
+    /// After `f`, `F`, `t` or `T` jumps to a character, label the other
+    /// visible occurrences of that character so that typing a label jumps
+    /// there.
+    pub flash_find: Option<FlashFindSettingsContent>,
+    /// Hide the completions menu when one of the given keys is typed.
+    pub completion_dismiss: Option<CompletionDismissSettingsContent>,
+    /// Preview the matches and replacements of `:substitute` while typing it.
+    pub substitute_preview: Option<SubstitutePreviewSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct FlashFindSettingsContent {
+    /// Whether to label the other occurrences after a character find.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// The characters used as labels, nearest occurrence first. Any other key
+    /// removes the labels and acts as usual.
+    ///
+    /// Default: "asdfgqwertyuiopzxcvbnm"
+    pub labels: Option<String>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct CompletionDismissSettingsContent {
+    /// Whether typing one of `keys` hides the completions menu.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// The keys that hide the completions menu, such as "j" or "ctrl-k". The
+    /// key still does what it normally does, and the menu stays hidden until
+    /// the cursor leaves the current word or completions are requested.
+    ///
+    /// Default: ["j", "k"]
+    pub keys: Option<Vec<String>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct SubstitutePreviewSettingsContent {
+    /// Whether to highlight what `:s` would replace while it is typed.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+}
+
+/// Which modal keymaps are loaded.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct VimKeymapSettingsContent {
+    /// Whether to load the built-in Vim and Helix bindings. Turn this off to
+    /// build a modal keymap from scratch in your keymap files.
+    ///
+    /// Default: true
+    pub load_builtin: Option<bool>,
+    /// Extra keymap files, in the same format as `keymap.json`, loaded after
+    /// the built-in modal keymap and before your `keymap.json`. Paths may
+    /// start with `~`, and relative paths are relative to the config
+    /// directory.
+    ///
+    /// Default: []
+    pub files: Option<Vec<String>>,
 }
 
 #[derive(
@@ -1688,4 +1767,59 @@ impl std::str::FromStr for DelayMs {
             .map(DelayMs)
             .with_context(|| format!("failed to parse delay duration: {s}"))
     }
+}
+
+/// Settings for the competitive programming plugin. The workspace layout is
+/// the same as cptui's, so problems can be shared with its TUI and Neovim
+/// plugin.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct CompetitiveProgrammingSettingsContent {
+    /// Directory that problems are saved in.
+    ///
+    /// Default: "~/cp"
+    pub workspace: Option<String>,
+    /// Address the Competitive Companion receiver listens on.
+    ///
+    /// Default: "127.0.0.1"
+    pub host: Option<String>,
+    /// Port the Competitive Companion receiver listens on.
+    ///
+    /// Default: 27121
+    pub port: Option<u16>,
+    /// Whether to start the receiver when Zed starts.
+    ///
+    /// Default: false
+    pub autostart: Option<bool>,
+    /// Whether to open a problem's source file when it is received.
+    ///
+    /// Default: true
+    pub open_on_receive: Option<bool>,
+    /// Source file created for a new problem.
+    ///
+    /// Default: "main.cpp"
+    pub source: Option<String>,
+    /// File whose contents new source files start with.
+    ///
+    /// Default: null (a small C++ template)
+    pub template_file: Option<String>,
+    /// Used when a problem has no time limit.
+    ///
+    /// Default: 2000
+    pub default_timeout_ms: Option<u64>,
+    /// Tests time out after the problem's time limit times this.
+    ///
+    /// Default: 1.5
+    pub timeout_multiplier: Option<f32>,
+    /// How to compile and run sources, by file extension. In commands,
+    /// `$(FNAME)` is the source, `$(BIN)` the output binary and `$(DIR)` the
+    /// problem directory. Languages without `compile` are interpreted.
+    pub languages: Option<HashMap<String, CompetitiveProgrammingLanguageContent>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug, JsonSchema, MergeFrom)]
+pub struct CompetitiveProgrammingLanguageContent {
+    pub compile: Option<Vec<String>>,
+    pub run: Option<Vec<String>>,
 }

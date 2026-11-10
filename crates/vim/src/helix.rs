@@ -1522,7 +1522,7 @@ impl Vim {
         })
     }
 
-    fn visible_jump_range(
+    pub(crate) fn visible_jump_range(
         editor: &Editor,
         snapshot: &editor::EditorSnapshot,
         display_snapshot: &DisplaySnapshot,

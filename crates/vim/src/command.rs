@@ -1833,6 +1833,43 @@ fn wrap_count(action: Box<dyn Action>, range: &CommandRange) -> Option<Box<dyn A
 }
 
 pub fn command_interceptor(
+    input: &str,
+    workspace: WeakEntity<Workspace>,
+    cx: &mut App,
+) -> Task<CommandInterceptResult> {
+    let preview = substitute_command(input).map(|command| command.boxed_clone());
+    crate::plugins::schedule_command_changed(preview, workspace.clone(), cx);
+    intercept_command(input, workspace, cx)
+}
+
+/// Parses `input` if it is a `:substitute` command.
+fn substitute_command(mut input: &str) -> Option<ReplaceCommand> {
+    while input.starts_with(':') {
+        input = &input[1..];
+    }
+    let (range, query) = VimCommand::parse_range(input);
+    let query = query.trim_start();
+    if !query.starts_with('s') || query.starts_with("se ") || query.starts_with("set ") {
+        return None;
+    }
+    let mut substitute = "substitute".chars().peekable();
+    let mut query = query.chars().peekable();
+    while substitute
+        .peek()
+        .is_some_and(|char| Some(char) == query.peek())
+    {
+        substitute.next();
+        query.next();
+    }
+    let replacement = Replacement::parse(query)?;
+    let range = range.unwrap_or(CommandRange {
+        start: Position::CurrentLine { offset: 0 },
+        end: None,
+    });
+    Some(ReplaceCommand { replacement, range })
+}
+
+fn intercept_command(
     mut input: &str,
     workspace: WeakEntity<Workspace>,
     cx: &mut App,

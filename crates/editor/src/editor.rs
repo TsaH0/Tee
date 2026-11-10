@@ -176,7 +176,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, point, prelude::*,
     pulsating_between, px, relative, size,
 };
-use hover_links::{HoverLink, HoveredLinkState, find_file};
+use hover_links::{HoverLink, HoveredLinkState, InlayHighlight, find_file};
 use hover_popover::{HoverState, hide_hover};
 use indent_guides::ActiveIndentGuidesState;
 use inlays::{InlaySplice, inlay_hints::InlayHintRefreshReason};
@@ -1099,6 +1099,10 @@ pub struct Editor {
     edit_predictions_hidden_for_vim_mode: bool,
     show_edit_predictions_override: Option<bool>,
     show_completions_on_input_override: Option<bool>,
+    /// Start of the word whose automatic completions were dismissed, so that
+    /// typing more of that word doesn't reopen the menu.
+    suppressed_completions_word_start: Option<Anchor>,
+    substitute_preview_inlays: Vec<InlayId>,
     menu_edit_predictions_policy: MenuEditPredictionsPolicy,
     edit_prediction_preview: EditPredictionPreview,
     in_leading_whitespace: bool,
@@ -2511,6 +2515,8 @@ impl Editor {
             edit_predictions_hidden_for_vim_mode: false,
             show_edit_predictions_override: None,
             show_completions_on_input_override: None,
+            suppressed_completions_word_start: None,
+            substitute_preview_inlays: Vec::new(),
             menu_edit_predictions_policy: MenuEditPredictionsPolicy::ByProvider,
             edit_prediction_settings: EditPredictionSettings::Disabled,
             in_leading_whitespace: false,
@@ -9886,6 +9892,80 @@ impl Editor {
             map.highlight_text(key, ranges, style, false, cx)
         });
         cx.notify();
+    }
+
+    /// Previews a search and replace: each range is struck through and its
+    /// replacement is shown after it.
+    pub fn set_substitute_preview(
+        &mut self,
+        replacements: Vec<(Range<Anchor>, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_substitute_preview(cx);
+        if replacements.is_empty() {
+            return;
+        }
+        let status = cx.theme().status();
+        let created = status.created;
+        let created_background = status.created_background;
+        let ranges = replacements
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect::<Vec<_>>();
+        self.highlight_background(
+            HighlightKey::VimSubstitutePreview,
+            &ranges,
+            |_, theme| theme.status().deleted_background,
+            cx,
+        );
+        self.highlight_text(
+            HighlightKey::VimSubstitutePreview,
+            ranges,
+            HighlightStyle {
+                strikethrough: Some(gpui::StrikethroughStyle {
+                    thickness: px(1.),
+                    color: None,
+                }),
+                ..HighlightStyle::default()
+            },
+            cx,
+        );
+
+        let mut inlays = Vec::new();
+        let mut inlay_highlights = Vec::new();
+        for (range, text) in replacements {
+            if text.is_empty() {
+                continue;
+            }
+            let inlay = Inlay::edit_prediction(post_inc(&mut self.next_inlay_id), range.end, text);
+            inlay_highlights.push(InlayHighlight {
+                inlay: inlay.id,
+                inlay_position: inlay.position,
+                range: 0..inlay.text().len(),
+            });
+            self.substitute_preview_inlays.push(inlay.id);
+            inlays.push(inlay);
+        }
+        self.splice_inlays(&[], inlays, cx);
+        self.highlight_inlays(
+            HighlightKey::VimSubstitutePreview,
+            inlay_highlights,
+            HighlightStyle {
+                color: Some(created),
+                background_color: Some(created_background),
+                ..HighlightStyle::default()
+            },
+            cx,
+        );
+    }
+
+    pub fn clear_substitute_preview(&mut self, cx: &mut Context<Self>) {
+        self.clear_background_highlights(HighlightKey::VimSubstitutePreview, cx);
+        self.clear_highlights(HighlightKey::VimSubstitutePreview, cx);
+        if !self.substitute_preview_inlays.is_empty() {
+            let inlays = std::mem::take(&mut self.substitute_preview_inlays);
+            self.splice_inlays(&inlays, Vec::new(), cx);
+        }
     }
 
     pub fn text_highlights<'a>(

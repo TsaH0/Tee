@@ -19631,6 +19631,7 @@ dependencies = [
  "db",
  "editor",
  "env_logger 0.11.8",
+ "fancy-regex",
  "futures 0.3.34",
  "fuzzy",
  "git_ui",
