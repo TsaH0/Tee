@@ -18,7 +18,10 @@ fi
 
 case "$(uname -m)" in
     x86_64 | amd64) arch="x86_64" ;;
-    aarch64 | arm64) arch="aarch64" ;;
+    aarch64 | arm64)
+        echo "Fool releases are only built for x86_64. Build from source with script/install-linux instead."
+        exit 1
+        ;;
     *)
         echo "Unsupported architecture $(uname -m)"
         exit 1
