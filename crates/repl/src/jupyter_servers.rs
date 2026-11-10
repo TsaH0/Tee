@@ -39,13 +39,17 @@ pub const COLAB_RUNTIME_CELL: &str = r#"# Run this cell in Google Colab, then pa
 import re, secrets, subprocess, sys, threading
 
 token = secrets.token_hex(24)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "jupyter_server", "ipykernel"], check=True)
+# Colab ships a Jupyter server; upgrading it could break the Colab tab itself.
+try:
+    import jupyter_server
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "jupyter_server"], check=True)
 subprocess.run(["wget", "-q", "-O", "/usr/local/bin/cloudflared",
     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"], check=True)
 subprocess.run(["chmod", "+x", "/usr/local/bin/cloudflared"], check=True)
 subprocess.Popen([sys.executable, "-m", "jupyter", "server", "--no-browser", "--allow-root",
     "--ip=127.0.0.1", "--port=8890", "--ServerApp.port_retries=0",
-    f"--IdentityProvider.token={token}", "--ServerApp.root_dir=/content"],
+    f"--ServerApp.token={token}", "--ServerApp.root_dir=/content"],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 tunnel = subprocess.Popen(["cloudflared", "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:8890"],
     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

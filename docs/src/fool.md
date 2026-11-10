@@ -1,6 +1,6 @@
 ---
 title: Fool Plugins and Customization
-description: Runtime plugins, built-in Vim/Helix plugins, custom modal keymaps, :substitute, the file explorer and competitive programming in Fool.
+description: Runtime plugins, built-in Vim/Helix plugins, custom modal keymaps, :substitute, the file explorer, Jupyter notebooks with Colab and competitive programming in Fool.
 ---
 
 # Fool Plugins and Customization
@@ -178,6 +178,85 @@ follow Yazi:
 | `s` / `/` | find a file / search in a directory |
 | `c c` / `c r` | copy the path / relative path |
 | `shift-o` | open with the system |
+
+## Jupyter notebooks and Google Colab
+
+`.ipynb` files open as notebooks. Pick a kernel from the kernel picker in the
+notebook's toolbar (`space n s`): local Jupyter kernels and Python environments
+with `ipykernel` are listed, along with the kernels of any remote Jupyter server
+you connect to.
+
+### Running on Colab's GPUs and CPUs
+
+1. Run `repl: connect to colab` (`space n g` in a notebook). This copies a cell
+   to your clipboard and opens a prompt.
+2. In a Google Colab notebook, choose the runtime you want (for example a T4 GPU
+   under *Runtime → Change runtime type*), paste the cell into a code cell and
+   run it. It starts a Jupyter server in the runtime, behind a free Cloudflare
+   tunnel, and prints a URL like `https://….trycloudflare.com/?token=…`.
+3. Paste that URL into Fool's prompt and press `enter`. Fool checks that the
+   server answers and saves it as `Colab` under `jupyter.servers`.
+4. In your notebook, pick the `Colab` kernel in the kernel picker. Cells now run
+   on the Colab runtime, so `!nvidia-smi` or `torch.cuda.is_available()` see its
+   GPU.
+
+Keep the Colab tab open: Colab stops idle runtimes, and a new runtime needs the
+cell run again, which prints a new URL. Connecting again replaces the old
+`Colab` entry. The runtime's files are its own, so upload data to it (or mount
+Google Drive in the Colab tab) rather than expecting your local files there.
+
+This works through Colab's ordinary notebook runtime. Google's VS Code extension
+signs in to Colab directly, which needs Google's own sign-in client, so Fool
+connects through the tunnel instead.
+
+`repl: connect to jupyter server` (`space n j`) connects to any other Jupyter
+server the same way, given the URL with its token that `jupyter server` prints.
+Servers are saved in your settings:
+
+```json
+{
+  "jupyter": {
+    "servers": [{ "name": "Lab", "url": "https://lab.example.com/?token=…" }]
+  }
+}
+```
+
+The token is stored in plain text in `settings.json`.
+
+### Notebook keys
+
+A notebook has a command mode for working with cells (press `escape` in a
+cell's normal mode to get there) and an edit mode for typing in a cell (`i`,
+`a` or `enter`).
+
+| Action | Vim and Helix | Jupyter style |
+|--------|---------------|---------------|
+| Next / previous cell | `j` / `k` | `j` / `k`, `down` / `up` |
+| First / last cell | `g g` / `shift-g` | |
+| Edit the cell | `i`, `a`, `enter` | `enter` |
+| Back to command mode | `escape` (in normal mode) | `escape` |
+| Run the cell and go to the next | `shift-enter` | `shift-enter` |
+| Run the cell | `ctrl-enter` | `ctrl-enter` |
+| Run the cell and insert one below | `alt-enter` | `alt-enter` |
+| Run all | `space n r` | `ctrl-shift-enter` |
+| Run all above | `space n a` | |
+| Run the cell and all below | `space n b` | |
+| Insert a cell below / above | `o` / `shift-o` | `b` / `a` |
+| Delete the cell | `d d` (also copies it) | `d d` |
+| Undo deleting a cell | `u` | `z` |
+| Copy / cut the cell | `y y` / `d d` | `c` / `x` |
+| Paste below / above | `p` / `shift-p` | `v` / `shift-v` |
+| Move the cell down / up | `shift-j` / `shift-k` | `alt-down` / `alt-up` |
+| Turn into markdown / code | `space n m` / `space n y` | `m` / `y` |
+| Clear the cell's output / all outputs | `space n x` / `space n c` | |
+| Interrupt the kernel | `ctrl-c`, `space n i` | `i i` |
+| Restart the kernel | `space n k` | `0 0`, `ctrl-shift-r` |
+| Restart and run all | `space n shift-r` | |
+| Pick a kernel | `space n s` | |
+| Connect to Colab / a Jupyter server | `space n g` / `space n j` | |
+
+The `space n` keys also work inside a cell in normal mode, and every action is
+in the command palette under `notebook:`.
 
 ## Competitive programming
 

@@ -3015,3 +3015,158 @@ mod cell_action_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod keymap_tests {
+    use gpui::{KeyContext, Keystroke, TestAppContext};
+    use settings::KeymapFile;
+
+    fn load(cx: &mut TestAppContext, paths: &[&str]) {
+        cx.update(|cx| {
+            cx.clear_key_bindings();
+            for path in paths {
+                // Actions from crates this test doesn't link fail to load,
+                // which doesn't matter for the notebook's bindings.
+                if let Ok(bindings) = KeymapFile::load_asset_allow_partial_failure(path, cx) {
+                    cx.bind_keys(bindings);
+                }
+            }
+        });
+    }
+
+    /// The action `keys` run with `contexts` focused, innermost last.
+    fn action_for(cx: &mut TestAppContext, contexts: &[&str], keys: &str) -> Option<String> {
+        cx.update(|cx| {
+            let context_stack = contexts
+                .iter()
+                .map(|context| KeyContext::parse(context).expect("valid context"))
+                .collect::<Vec<_>>();
+            let keystrokes = keys
+                .split(' ')
+                .map(|key| {
+                    Keystroke::parse_with_os(key, gpui::OperatingSystem::Linux)
+                        .expect("valid keystroke")
+                })
+                .collect::<Vec<_>>();
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let (bindings, _pending) = keymap.bindings_for_input(&keystrokes, &context_stack);
+            bindings
+                .first()
+                .map(|binding| binding.action().name().to_string())
+        })
+    }
+
+    const COMMAND_MODE: &[&str] = &["Workspace", "NotebookEditor notebook_mode=command"];
+
+    fn in_cell(vim_mode: &str) -> Vec<String> {
+        vec![
+            "Workspace".to_string(),
+            "NotebookEditor notebook_mode=edit".to_string(),
+            format!("Editor mode=full VimControl vim_mode={vim_mode}"),
+        ]
+    }
+
+    #[gpui::test]
+    fn test_jupyter_bindings(cx: &mut TestAppContext) {
+        load(cx, &["keymaps/default-linux.json"]);
+        for (keys, action) in [
+            ("a", "notebook::InsertCellAbove"),
+            ("b", "notebook::InsertCellBelow"),
+            ("m", "notebook::ChangeCellToMarkdown"),
+            ("y", "notebook::ChangeCellToCode"),
+            ("c", "notebook::CopyCell"),
+            ("x", "notebook::CutCell"),
+            ("v", "notebook::PasteCellBelow"),
+            ("shift-v", "notebook::PasteCellAbove"),
+            ("z", "notebook::UndoDeleteCell"),
+            ("d d", "notebook::DeleteCell"),
+            ("0 0", "notebook::RestartKernel"),
+            ("i i", "notebook::InterruptKernel"),
+            ("enter", "notebook::EnterEditMode"),
+            ("shift-enter", "notebook::RunAndAdvance"),
+            ("ctrl-enter", "notebook::Run"),
+            ("alt-enter", "notebook::RunAndInsertBelow"),
+            ("ctrl-shift-enter", "notebook::RunAll"),
+        ] {
+            assert_eq!(
+                action_for(cx, COMMAND_MODE, keys).as_deref(),
+                Some(action),
+                "`{keys}` in command mode"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn test_vim_and_helix_bindings(cx: &mut TestAppContext) {
+        load(cx, &["keymaps/default-linux.json", "keymaps/vim.json"]);
+        let leader = [
+            ("space n r", "notebook::RunAll"),
+            ("space n a", "notebook::RunAllAbove"),
+            ("space n b", "notebook::RunCellAndBelow"),
+            ("space n shift-r", "notebook::RestartAndRunAll"),
+            ("space n k", "notebook::RestartKernel"),
+            ("space n i", "notebook::InterruptKernel"),
+            ("space n c", "notebook::ClearOutputs"),
+            ("space n x", "notebook::ClearCellOutput"),
+            ("space n m", "notebook::ChangeCellToMarkdown"),
+            ("space n y", "notebook::ChangeCellToCode"),
+            ("space n s", "notebook::SelectKernel"),
+            ("space n j", "repl::ConnectToJupyterServer"),
+            ("space n g", "repl::ConnectToColab"),
+        ];
+        let command_mode = [
+            ("j", "menu::SelectNext"),
+            ("k", "menu::SelectPrevious"),
+            ("g g", "menu::SelectFirst"),
+            ("shift-g", "menu::SelectLast"),
+            ("i", "notebook::EnterEditMode"),
+            ("a", "notebook::EnterEditMode"),
+            ("enter", "notebook::EnterEditMode"),
+            ("o", "notebook::InsertCellBelow"),
+            ("shift-o", "notebook::InsertCellAbove"),
+            ("y y", "notebook::CopyCell"),
+            ("d d", "notebook::CutCell"),
+            ("p", "notebook::PasteCellBelow"),
+            ("shift-p", "notebook::PasteCellAbove"),
+            ("u", "notebook::UndoDeleteCell"),
+            ("shift-j", "notebook::MoveCellDown"),
+            ("shift-k", "notebook::MoveCellUp"),
+            ("shift-enter", "notebook::RunAndAdvance"),
+            ("ctrl-enter", "notebook::Run"),
+            ("alt-enter", "notebook::RunAndInsertBelow"),
+            ("ctrl-c", "notebook::InterruptKernel"),
+        ];
+        for (keys, action) in command_mode.iter().chain(leader.iter()) {
+            assert_eq!(
+                action_for(cx, COMMAND_MODE, keys).as_deref(),
+                Some(*action),
+                "`{keys}` in command mode"
+            );
+        }
+        // `y` alone and `i i` would make `y y` and `i` wait.
+        assert_eq!(action_for(cx, COMMAND_MODE, "y"), None);
+
+        for vim_mode in ["normal", "helix_normal"] {
+            let contexts = in_cell(vim_mode);
+            let contexts = contexts.iter().map(String::as_str).collect::<Vec<_>>();
+            for (keys, action) in [
+                ("escape", "notebook::EnterCommandMode"),
+                ("j", "notebook::NotebookMoveDown"),
+                ("k", "notebook::NotebookMoveUp"),
+                ("shift-enter", "notebook::RunAndAdvance"),
+                ("ctrl-enter", "notebook::Run"),
+                ("alt-enter", "notebook::RunAndInsertBelow"),
+            ]
+            .iter()
+            .chain(leader.iter())
+            {
+                assert_eq!(
+                    action_for(cx, &contexts, keys).as_deref(),
+                    Some(*action),
+                    "`{keys}` in a cell in {vim_mode} mode"
+                );
+            }
+        }
+    }
+}
