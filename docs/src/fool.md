@@ -1,11 +1,11 @@
 ---
-title: Tee Plugins and Customization
-description: Runtime plugins, built-in Vim/Helix plugins, custom modal keymaps, :substitute, the file explorer and competitive programming in Tee.
+title: Fool Plugins and Customization
+description: Runtime plugins, built-in Vim/Helix plugins, custom modal keymaps, :substitute, the file explorer and competitive programming in Fool.
 ---
 
-# Tee Plugins and Customization
+# Fool Plugins and Customization
 
-Tee is Zed with an extended Vim and Helix mode. Everything on this page can be
+Fool is Zed with an extended Vim and Helix mode. Everything on this page can be
 changed while the editor runs: settings and keymaps reload when you save them,
 and runtime plugins load from a folder. None of it needs a rebuild.
 
@@ -62,7 +62,7 @@ The editor sends:
 
 | Message | Fields |
 |---------|--------|
-| `initialize` | `protocol_version` (1), `editor` ("tee"), `plugin_dir`, `config_dir` |
+| `initialize` | `protocol_version` (1), `editor` ("fool"), `plugin_dir`, `config_dir` |
 | `command` | `id`, `command`, `args` (text after the ex command), `context` |
 | `event` | `event` ("saved" or "opened"), `data.file` |
 
@@ -178,10 +178,10 @@ follow Yazi:
 
 ## Competitive programming
 
-Tee receives problems from
+Fool receives problems from
 [Competitive Companion](https://github.com/jmerle/competitive-companion) and
 runs their tests, using the same workspace layout as
-[cptui](https://github.com/TsaH0/cptui), so problems move freely between Tee,
+[cptui](https://github.com/TsaH0/cptui), so problems move freely between Fool,
 the cptui TUI and its Neovim plugin. Its browser extension's "Fetch top 3
 solutions" also works.
 

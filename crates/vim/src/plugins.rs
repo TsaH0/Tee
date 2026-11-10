@@ -761,6 +761,28 @@ mod test {
     }
 
     #[gpui::test]
+    async fn test_flash_find_backward_labels(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // `F` labels the occurrences before the cursor, nearest first.
+        cx.set_state("abc abc abc abˇc", Mode::Normal);
+        cx.simulate_keystrokes("shift-f c");
+        cx.assert_state("abc abc abˇc abc", Mode::Normal);
+        cx.simulate_keystrokes("s");
+        cx.assert_state("abˇc abc abc abc", Mode::Normal);
+
+        // `T` stops after the occurrence, like `{count}T{char}`.
+        cx.set_state("abc abc abc abˇc", Mode::Normal);
+        cx.simulate_keystrokes("shift-t a a");
+        cx.assert_state("abc abc aˇbc abc", Mode::Normal);
+
+        // Occurrences after the cursor get labels after the ones before it.
+        cx.set_state("abc abˇc abc", Mode::Normal);
+        cx.simulate_keystrokes("shift-f c a");
+        cx.assert_state("abc abc abˇc", Mode::Normal);
+    }
+
+    #[gpui::test]
     async fn test_flash_find_in_helix_mode(cx: &mut gpui::TestAppContext) {
         let mut cx = VimTestContext::new(cx, true).await;
         cx.enable_helix();
@@ -768,5 +790,13 @@ mod test {
         cx.set_state("ˇabc abc abc", Mode::HelixNormal);
         cx.simulate_keystrokes("f c a");
         cx.assert_state("«abc abcˇ» abc", Mode::HelixNormal);
+
+        cx.set_state("abc abc abˇc", Mode::HelixNormal);
+        cx.simulate_keystrokes("shift-f a a");
+        cx.assert_state("abc «ˇabc abc»", Mode::HelixNormal);
+
+        cx.set_state("ˇabc abc abc", Mode::HelixNormal);
+        cx.simulate_keystrokes("t c a");
+        cx.assert_state("«abc abˇ»c abc", Mode::HelixNormal);
     }
 }

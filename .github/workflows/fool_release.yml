@@ -2,28 +2,28 @@
 # as a GitHub release. Upstream's release.yml needs Zed's own runners and
 # secrets, so it can't run here.
 #
-# Every push to main publishes a release tagged `tee-v0.1.<run number>`. You
-# can also push a tag like `tee-v0.2.0`, or run this workflow manually from the
+# Every push to main publishes a release tagged `fool-v0.1.<run number>`. You
+# can also push a tag like `fool-v0.2.0`, or run this workflow manually from the
 # Actions tab with the tag to create.
-name: Tee release
+name: Fool release
 
 on:
   push:
     branches:
       - main
     tags:
-      - "tee-v*"
+      - "fool-v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to create the release under, e.g. tee-v0.1.0
+        description: Tag to create the release under, e.g. fool-v0.1.0
         required: true
 
 permissions:
   contents: write
 
 concurrency:
-  group: tee-release-${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || format('tee-v0.1.{0}', github.run_number) }}
+  group: fool-release-${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || format('fool-v0.1.{0}', github.run_number) }}
   cancel-in-progress: false
 
 jobs:
@@ -89,16 +89,16 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || format('tee-v0.1.{0}', github.run_number) }}
+          TAG: ${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || format('fool-v0.1.{0}', github.run_number) }}
         run: |
           gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Tee $TAG" \
-            --notes "Linux builds of Tee (Zed with extended Helix mode) from ${GITHUB_SHA::7}.
+            --title "Fool $TAG" \
+            --notes "Linux builds of Fool (Zed with extended Helix mode) from ${GITHUB_SHA::7}.
 
           Install or update with:
 
           \`\`\`sh
-          curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/$TAG/script/install-tee.sh | sh
+          curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/$TAG/script/install-fool.sh | sh
           \`\`\`"

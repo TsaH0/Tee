@@ -1,6 +1,6 @@
 {
   "name": "hello",
-  "description": "Example Tee plugin",
+  "description": "Example Fool plugin",
   "run": ["python3", "hello.py"],
   "events": ["saved"],
   "commands": [

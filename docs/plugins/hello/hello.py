@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""An example Tee plugin. Copy this folder to ~/.config/zed/plugins/hello."""
+"""An example Fool plugin. Copy this folder to ~/.config/zed/plugins/hello."""
 
 import json
 import sys
