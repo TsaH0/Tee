@@ -193,6 +193,64 @@ async fn test_opening_file(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_open_and_close_panel(cx: &mut gpui::TestAppContext) {
+    init_test_with_editor(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/src"),
+        json!({
+            "test": {
+                "first.rs": "// First Rust file",
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/src").as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let panel = ProjectPanel::new(workspace, window, cx);
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.toggle_panel_focus::<ProjectPanel>(window, cx);
+        panel
+    });
+    cx.run_until_parked();
+    let is_panel_open = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.all_docks().iter().any(|dock| {
+                let dock = dock.read(cx);
+                dock.is_open()
+                    && dock
+                        .active_panel()
+                        .is_some_and(|panel| panel.persistent_name() == "Project Panel")
+            })
+        })
+    };
+    assert!(is_panel_open(cx));
+
+    // A directory is expanded, and the panel stays open.
+    select_path(&panel, "src/test", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.open_and_close_panel(&OpenAndClosePanel, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(is_panel_open(cx));
+
+    select_path(&panel, "src/test/first.rs", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.open_and_close_panel(&OpenAndClosePanel, window, cx)
+    });
+    cx.run_until_parked();
+    ensure_single_file_is_opened(&workspace, "test/first.rs", cx);
+    assert!(!is_panel_open(cx));
+}
+
+#[gpui::test]
 async fn test_opening_file_with_project_panel_previews_disabled(cx: &mut gpui::TestAppContext) {
     init_test_with_editor(cx);
     cx.update(|cx| {

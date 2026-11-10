@@ -1996,11 +1996,16 @@ impl ProjectPanel {
             return;
         }
         self.open_entry(entry.id, true, false, cx);
-        self.workspace
-            .update(cx, |workspace, cx| {
-                workspace.close_panel::<ProjectPanel>(window, cx);
-            })
-            .ok();
+        // Closing the dock updates this panel, which is still being updated
+        // here, so it has to wait until this action is done.
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.close_panel::<ProjectPanel>(window, cx);
+                })
+                .ok();
+        });
     }
 
     fn open_split_vertical(
