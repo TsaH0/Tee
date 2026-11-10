@@ -8,7 +8,10 @@ use editor::{DisplayPoint, display_map::DisplaySnapshot, movement};
 use text::Selection;
 
 use crate::{
-    helix::boundary::{FuzzyBoundary, ImmediateBoundary, NearestPair},
+    helix::boundary::{
+        BRACKET_BOUNDARIES, ClosestPair, ClosestPairOf, FuzzyBoundary, ImmediateBoundary,
+        NearestPair, QUOTE_BOUNDARIES,
+    },
     object::Object as VimObject,
 };
 
@@ -103,20 +106,22 @@ impl Error for VimToHelixError {}
 impl VimObject {
     fn to_helix_object(self) -> Option<Box<dyn HelixTextObject>> {
         Some(match self {
-            Self::AngleBrackets => Box::new(ImmediateBoundary::AngleBrackets),
+            Self::AngleBrackets => Box::new(ClosestPair(ImmediateBoundary::AngleBrackets)),
+            Self::AnyBrackets => Box::new(ClosestPairOf(&BRACKET_BOUNDARIES)),
             Self::AnyPair => Box::new(NearestPair),
-            Self::BackQuotes => Box::new(ImmediateBoundary::BackQuotes),
-            Self::CurlyBrackets => Box::new(ImmediateBoundary::CurlyBrackets),
-            Self::DoubleQuotes => Box::new(ImmediateBoundary::DoubleQuotes),
+            Self::AnyQuotes => Box::new(ClosestPairOf(&QUOTE_BOUNDARIES)),
+            Self::BackQuotes => Box::new(ClosestPair(ImmediateBoundary::BackQuotes)),
+            Self::CurlyBrackets => Box::new(ClosestPair(ImmediateBoundary::CurlyBrackets)),
+            Self::DoubleQuotes => Box::new(ClosestPair(ImmediateBoundary::DoubleQuotes)),
             Self::Paragraph => Box::new(FuzzyBoundary::Paragraph),
-            Self::Parentheses => Box::new(ImmediateBoundary::Parentheses),
-            Self::Quotes => Box::new(ImmediateBoundary::SingleQuotes),
+            Self::Parentheses => Box::new(ClosestPair(ImmediateBoundary::Parentheses)),
+            Self::Quotes => Box::new(ClosestPair(ImmediateBoundary::SingleQuotes)),
             Self::Sentence => Box::new(FuzzyBoundary::Sentence),
-            Self::SquareBrackets => Box::new(ImmediateBoundary::SquareBrackets),
+            Self::SquareBrackets => Box::new(ClosestPair(ImmediateBoundary::SquareBrackets)),
             Self::Subword { ignore_punctuation } => {
                 Box::new(ImmediateBoundary::Subword { ignore_punctuation })
             }
-            Self::VerticalBars => Box::new(ImmediateBoundary::VerticalBars),
+            Self::VerticalBars => Box::new(ClosestPair(ImmediateBoundary::VerticalBars)),
             Self::Word { ignore_punctuation } => {
                 Box::new(ImmediateBoundary::Word { ignore_punctuation })
             }
@@ -274,6 +279,173 @@ mod test {
         cx.set_state("(baz) foˇo", Mode::HelixNormal);
         cx.simulate_keystrokes("[ m");
         cx.assert_state("«ˇ(baz)» foo", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_select_closest_explicit_pair_object(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // With the cursor before a pair, the pair after it is selected.
+        cx.set_state("simˇple (single) surround pairs", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i (");
+        cx.assert_state("simple («singleˇ») surround pairs", Mode::HelixNormal);
+
+        cx.set_state("simˇple (single) surround pairs", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a )");
+        cx.assert_state("simple «(single)ˇ» surround pairs", Mode::HelixNormal);
+
+        // With the cursor on either quote, the string it belongs to is selected.
+        for start in [
+            "samˇexx 'single' surround pairs",
+            "samexx ˇ'single' surround pairs",
+            "samexx 'single'ˇ surround pairs",
+        ] {
+            cx.set_state(start, Mode::HelixNormal);
+            cx.simulate_keystrokes("m i '");
+            cx.assert_state("samexx '«singleˇ»' surround pairs", Mode::HelixNormal);
+        }
+        cx.set_state("samexx 'single'ˇ surround pairs", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a '");
+        cx.assert_state("samexx «'single'ˇ» surround pairs", Mode::HelixNormal);
+
+        // A quote on a previous line is never paired with a quote on the
+        // cursor's line.
+        for start in [
+            "a \"x\"\nfoˇo \"hello worl \" bar",
+            "a \"x\"\nfoo \"hello worl \" bˇar",
+        ] {
+            cx.set_state(start, Mode::HelixNormal);
+            cx.simulate_keystrokes("m i \"");
+            cx.assert_state("a \"x\"\nfoo \"«hello worl ˇ»\" bar", Mode::HelixNormal);
+        }
+
+        // Between two strings, the closing quote of the first one is never
+        // paired with the opening quote of the second one.
+        for (start, expected) in [
+            ("\"one\" mˇid \"two\" end", "\"one\" mid \"«twoˇ»\" end"),
+            ("ˇ\"one\" mid \"two\" end", "\"«oneˇ»\" mid \"two\" end"),
+            ("\"oneˇ\" mid \"two\" end", "\"«oneˇ»\" mid \"two\" end"),
+            ("\"one\"ˇ mid \"two\" end", "\"one\" mid \"«twoˇ»\" end"),
+            ("\"one\" mid ˇ\"two\" end", "\"one\" mid \"«twoˇ»\" end"),
+            ("\"one\" mid \"two\" ˇend", "\"one\" mid \"«twoˇ»\" end"),
+        ] {
+            cx.set_state(start, Mode::HelixNormal);
+            cx.simulate_keystrokes("m i \"");
+            cx.assert_state(expected, Mode::HelixNormal);
+        }
+
+        // Escaped quotes are not delimiters.
+        for start in ["ˇx \"a \\\" b\" y", "x \"a ˇ\\\" b\" y"] {
+            cx.set_state(start, Mode::HelixNormal);
+            cx.simulate_keystrokes("m i \"");
+            cx.assert_state("x \"«a \\\" bˇ»\" y", Mode::HelixNormal);
+        }
+
+        // A string spanning lines is still found when the cursor's line has no
+        // complete pair.
+        for start in ["s = \"abc\ndˇef\"", "ˇs = \"abc\ndef\""] {
+            cx.set_state(start, Mode::HelixNormal);
+            cx.simulate_keystrokes("m i \"");
+            cx.assert_state("s = \"«abc\ndefˇ»\"", Mode::HelixNormal);
+        }
+
+        // Brackets prefer a pair on the cursor's line over a nearer pair on
+        // another line, and the next pair over the previous one.
+        for (start, keys, expected) in [
+            ("(a)\nˇfoo (b) bar (c)", "m i (", "(a)\nfoo («bˇ») bar (c)"),
+            ("(a)\nfoo (b) ˇbar (c)", "m i (", "(a)\nfoo (b) bar («cˇ»)"),
+            ("(a)\nfoo (b) barˇ (c)", "m i )", "(a)\nfoo (b) bar («cˇ»)"),
+            ("(ˇa)\nfoo (b) bar (c)", "m i (", "(«aˇ»)\nfoo (b) bar (c)"),
+            ("(a)\nfoo (b) bar bˇaz", "m i (", "(a)\nfoo («bˇ») bar baz"),
+        ] {
+            cx.set_state(start, Mode::HelixNormal);
+            cx.simulate_keystrokes(keys);
+            cx.assert_state(expected, Mode::HelixNormal);
+        }
+
+        // An enclosing pair still wins over a pair on the cursor's line.
+        cx.set_state("{ fooˇ (bar) }", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i {");
+        cx.assert_state("{« foo (bar) ˇ»}", Mode::HelixNormal);
+
+        // Without any such pair the selection is unchanged.
+        cx.set_state("foo bˇar baz", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i (");
+        cx.assert_state("foo bˇar baz", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_select_nearest_bracket_and_quote_objects(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // `b` is the innermost enclosing (), [] or {}.
+        cx.set_state("f(a, [bˇ, c])", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i b");
+        cx.assert_state("f(a, [«b, cˇ»])", Mode::HelixNormal);
+        cx.set_state("f(a, [bˇ, c])", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a b");
+        cx.assert_state("f(a, «[b, c]ˇ»)", Mode::HelixNormal);
+
+        // Outside any pair, the one that opens nearest to the cursor.
+        cx.set_state("[x] ˇy {z}", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i b");
+        cx.assert_state("[x] y {«zˇ»}", Mode::HelixNormal);
+
+        // `q` is the nearest ", ' or ` quotes.
+        cx.set_state("say 'it \"wˇell\"'", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i q");
+        cx.assert_state("say 'it \"«wellˇ»\"'", Mode::HelixNormal);
+        cx.set_state("say ˇ'it \"well\"'", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i q");
+        cx.assert_state("say '«it \"well\"ˇ»'", Mode::HelixNormal);
+        cx.set_state("a = `bˇc` + \"d\"", Mode::HelixNormal);
+        cx.simulate_keystrokes("m a q");
+        cx.assert_state("a = «`bc`ˇ» + \"d\"", Mode::HelixNormal);
+
+        // `A` is <>.
+        cx.set_state("Vec<Option<ˇu8>>", Mode::HelixNormal);
+        cx.simulate_keystrokes("m i shift-a");
+        cx.assert_state("Vec<Option<«u8ˇ»>>", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_select_next_pair_inside_on_line(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("ˇlet x = foo(bar, \"baz\");", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-m");
+        cx.assert_state("let x = foo(«bar, \"baz\"ˇ»);", Mode::HelixNormal);
+
+        // A pair the cursor is inside is skipped.
+        cx.set_state("foo(bˇar, \"baz\")", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-m");
+        cx.assert_state("foo(bar, \"«bazˇ»\")", Mode::HelixNormal);
+
+        // Only pairs that open on the cursor's line count.
+        cx.set_state("fooˇ bar\n(baz)", Mode::HelixNormal);
+        cx.simulate_keystrokes("alt-m");
+        cx.assert_state("fooˇ bar\n(baz)", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_enter_and_shell_command_keys(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+        cx.set_state("ˇone\ntwo", Mode::HelixNormal);
+
+        // Enter shows jump labels instead of moving down a line.
+        cx.simulate_keystrokes("enter");
+        cx.assert_state("ˇone\ntwo", Mode::HelixNormal);
+        cx.simulate_keystrokes("escape");
+
+        cx.simulate_keystrokes("space x");
+        cx.run_until_parked();
+        assert!(cx.workspace(|workspace, _, cx| {
+            workspace
+                .active_modal::<command_palette::CommandPalette>(cx)
+                .is_some()
+        }));
     }
 
     #[gpui::test]

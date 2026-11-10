@@ -1,0 +1,11 @@
+{
+  "name": "hello",
+  "description": "Example Tee plugin",
+  "run": ["python3", "hello.py"],
+  "events": ["saved"],
+  "commands": [
+    { "name": "greet", "description": "Say hello", "vim": "Hello" },
+    { "name": "count", "description": "Count the words in the buffer", "vim": "Words", "wants_text": true },
+    { "name": "upper", "description": "Uppercase the selections", "vim": "Upper" }
+  ]
+}

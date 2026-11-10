@@ -13,11 +13,13 @@ mod mode_indicator;
 mod motion;
 mod normal;
 mod object;
+mod plugins;
 mod replace;
 mod rewrap;
 mod state;
 mod surrounds;
 mod visual;
+mod vim_regex;
 
 use crate::normal::paste::Paste as VimPaste;
 use collections::HashMap;
@@ -539,6 +541,9 @@ pub(crate) struct Vim {
 
     last_command: Option<String>,
     running_command: Option<Task<()>>,
+    plugins: Vec<Box<dyn plugins::VimPlugin>>,
+    /// Whether `:!` showed output in a terminal that Escape should close.
+    pub(crate) shell_output_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -607,9 +612,13 @@ impl Vim {
             last_command: None,
             running_command: None,
 
+            plugins: plugins::create_plugins(),
+            shell_output_open: false,
+
             editor: editor.downgrade(),
             _subscriptions: vec![
                 cx.observe_keystrokes(Self::observe_keystrokes),
+                Self::subscribe_plugin_keystrokes(cx),
                 cx.subscribe_in(&editor, window, |this, _, event, window, cx| {
                     this.handle_editor_event(event, window, cx)
                 }),
@@ -1149,8 +1158,14 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         match event {
-            EditorEvent::Focused => self.focused(true, window, cx),
-            EditorEvent::Blurred => self.blurred(window, cx),
+            EditorEvent::Focused => {
+                self.focused(true, window, cx);
+                self.notify_plugins_focus(true, window, cx);
+            }
+            EditorEvent::Blurred => {
+                self.blurred(window, cx);
+                self.notify_plugins_focus(false, window, cx);
+            }
             EditorEvent::SelectionsChanged { local: true } => {
                 self.local_selections_changed(window, cx);
             }
@@ -1497,6 +1512,10 @@ impl Vim {
 
         let mut operator_id = "none";
 
+        if self.shell_output_open {
+            context.add("vim_shell_output");
+        }
+
         let active_operator = self.active_operator();
         if active_operator.is_none() && cx.global::<VimGlobals>().pre_count.is_some()
             || active_operator.is_some() && cx.global::<VimGlobals>().post_count.is_some()
@@ -1543,8 +1562,9 @@ impl Vim {
         }
         // `vim_mode` is replaced by "operator"/"waiting" while an operator is
         // pending, so expose helix-ness separately to allow Helix-specific
-        // bindings in those states (e.g. text objects after `mi`/`ma`).
-        if self.mode.is_helix() {
+        // bindings in those states (e.g. text objects after `mi`/`ma`), and in
+        // insert mode, which Helix mode shares with Vim mode.
+        if self.mode.is_helix() || HelixModeSetting::get_global(cx).0 {
             context.add("helix_mode");
         }
         context.set("vim_mode", mode);
@@ -2052,6 +2072,17 @@ impl Vim {
         }
     }
 
+    /// The selections a plain find motion starts from, or `None` when the
+    /// find is part of an operator, where plugins shouldn't react to it.
+    fn find_plugin_origin(&mut self, cx: &mut Context<Self>) -> Option<Vec<Selection<Anchor>>> {
+        if self.operator_stack.len() != 1 {
+            return None;
+        }
+        self.update_editor(cx, |_, editor, _| {
+            editor.selections.disjoint_anchors_arc().to_vec()
+        })
+    }
+
     fn input_ignored(&mut self, text: Arc<str>, window: &mut Window, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
@@ -2059,6 +2090,7 @@ impl Vim {
 
         match self.active_operator() {
             Some(Operator::FindForward { before, multiline }) => {
+                let plugin_origin = self.find_plugin_origin(cx);
                 let find = Motion::FindForward {
                     before,
                     char: text.chars().next().unwrap(),
@@ -2070,9 +2102,13 @@ impl Vim {
                     smartcase: VimSettings::get_global(cx).use_smartcase_find,
                 };
                 Vim::globals(cx).last_find = Some(find.clone());
-                self.motion(find, window, cx)
+                self.motion(find.clone(), window, cx);
+                if let Some(origin) = plugin_origin {
+                    self.notify_plugins_find_motion(&find, &origin, window, cx);
+                }
             }
             Some(Operator::FindBackward { after, multiline }) => {
+                let plugin_origin = self.find_plugin_origin(cx);
                 let find = Motion::FindBackward {
                     after,
                     char: text.chars().next().unwrap(),
@@ -2084,7 +2120,10 @@ impl Vim {
                     smartcase: VimSettings::get_global(cx).use_smartcase_find,
                 };
                 Vim::globals(cx).last_find = Some(find.clone());
-                self.motion(find, window, cx)
+                self.motion(find.clone(), window, cx);
+                if let Some(origin) = plugin_origin {
+                    self.notify_plugins_find_motion(&find, &origin, window, cx);
+                }
             }
             Some(Operator::Sneak { first_char }) => {
                 if let Some(first_char) = first_char {

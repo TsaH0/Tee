@@ -40,3 +40,26 @@ impl Settings for HelixModeSetting {
         Self(content.helix_mode.unwrap())
     }
 }
+
+/// Which modal keymaps are loaded on top of the base keymap.
+#[derive(RegisterSetting, Clone, Debug, PartialEq)]
+pub struct VimKeymapSetting {
+    /// Whether the built-in Vim and Helix bindings are loaded.
+    pub load_builtin: bool,
+    /// Extra keymap files loaded after the built-in modal keymap.
+    pub files: Vec<String>,
+}
+
+impl Settings for VimKeymapSetting {
+    fn from_settings(content: &SettingsContent) -> Self {
+        let keymap = content
+            .vim
+            .as_ref()
+            .and_then(|vim| vim.keymap.clone())
+            .unwrap_or_default();
+        Self {
+            load_builtin: keymap.load_builtin.unwrap_or(true),
+            files: keymap.files.unwrap_or_default(),
+        }
+    }
+}

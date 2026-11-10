@@ -3410,6 +3410,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "competitive_programming"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "fuzzy",
+ "gpui",
+ "language",
+ "log",
+ "multi_buffer",
+ "picker",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+ "tiny_http",
+ "toml 0.9.8",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "compliance"
 version = "0.1.0"
 dependencies = [
@@ -13553,6 +13583,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "fuzzy",
+ "gpui",
+ "language",
+ "log",
+ "multi_buffer",
+ "paths",
+ "picker",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "serde_json_lenient",
+ "smol",
+ "tempfile",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19617,6 +19673,7 @@ dependencies = [
  "db",
  "editor",
  "env_logger 0.11.8",
+ "fancy-regex",
  "futures 0.3.34",
  "fuzzy",
  "git_ui",
@@ -19634,6 +19691,7 @@ dependencies = [
  "parking_lot",
  "perf",
  "picker",
+ "plugin_host",
  "project",
  "project_panel",
  "regex",
@@ -22450,6 +22508,7 @@ dependencies = [
  "collab_ui",
  "collections",
  "command_palette",
+ "competitive_programming",
  "component_preview",
  "copilot",
  "copilot_chat",
@@ -22523,6 +22582,7 @@ dependencies = [
  "paths",
  "picker",
  "pkg-config",
+ "plugin_host",
  "pretty_assertions",
  "profiling",
  "project",

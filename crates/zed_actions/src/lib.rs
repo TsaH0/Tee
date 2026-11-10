@@ -998,3 +998,78 @@ pub mod git_panel {
         ]
     );
 }
+
+pub mod competitive_programming {
+    use gpui::{Action, actions};
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    actions!(
+        cp,
+        [
+            /// Starts listening for problems from Competitive Companion.
+            StartReceiver,
+            /// Stops listening for problems from Competitive Companion.
+            StopReceiver,
+            /// Shows whether the Competitive Companion receiver is running.
+            ReceiverStatus,
+            /// Reopens the results of the last test run.
+            ShowResults,
+            /// Adds an empty testcase to the current problem and opens it.
+            AddTestcase,
+            /// Opens the next problem of the current contest.
+            NextProblem,
+            /// Opens the previous problem of the current contest.
+            PreviousProblem,
+            /// Picks a problem from the workspace and opens its source.
+            OpenProblem,
+            /// Picks a fetched solution of the current problem and opens it.
+            OpenSolutions,
+            /// Opens the current problem's page in the browser.
+            OpenProblemUrl,
+        ]
+    );
+
+    /// Compiles the current problem and runs its tests.
+    #[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = cp)]
+    #[serde(deny_unknown_fields)]
+    pub struct RunTests {
+        /// Run only this testcase (starting at 1) instead of all of them.
+        #[serde(default)]
+        pub test: Option<usize>,
+    }
+
+    /// Opens a testcase's input and expected output.
+    #[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = cp)]
+    #[serde(deny_unknown_fields)]
+    pub struct EditTestcase {
+        /// The testcase, starting at 1.
+        #[serde(default = "first_test")]
+        pub test: usize,
+    }
+
+    /// Deletes a testcase and renumbers the others.
+    #[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = cp)]
+    #[serde(deny_unknown_fields)]
+    pub struct DeleteTestcase {
+        /// The testcase, starting at 1.
+        pub test: usize,
+    }
+
+    /// Saves a testcase's output from the last run as its expected output.
+    #[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = cp)]
+    #[serde(deny_unknown_fields)]
+    pub struct AcceptOutput {
+        /// The testcase, starting at 1. All tests of the last run when unset.
+        #[serde(default)]
+        pub test: Option<usize>,
+    }
+
+    fn first_test() -> usize {
+        1
+    }
+}

@@ -91,6 +91,39 @@ impl Editor {
         self.do_completion(action.item_ix, CompletionIntent::Compose, window, cx)
     }
 
+    /// Hides the completions menu and keeps it from reopening on input until
+    /// the cursor leaves the current word. Explicitly requested completions
+    /// still show. Returns whether a menu was hidden.
+    pub fn dismiss_completions_for_current_word(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.has_visible_completions_menu() {
+            return false;
+        }
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let head = self.selections.newest_anchor().head();
+        let word_start = Self::completion_word_start(&snapshot, head);
+        self.suppressed_completions_word_start = Some(snapshot.anchor_before(word_start));
+        self.hide_context_menu(window, cx);
+        true
+    }
+
+    fn completion_word_start(
+        buffer: &MultiBufferSnapshot,
+        position: impl ToOffset,
+    ) -> MultiBufferOffset {
+        let offset = position.to_offset(buffer);
+        let (word_range, kind) =
+            buffer.surrounding_word(offset, Some(CharScopeContext::Completion));
+        if kind == Some(CharKind::Word) && word_range.start <= offset {
+            word_range.start
+        } else {
+            offset
+        }
+    }
+
     pub fn has_visible_completions_menu(&self) -> bool {
         !self.edit_prediction_preview_is_active()
             && self.context_menu.borrow().as_ref().is_some_and(|menu| {
@@ -397,6 +430,17 @@ impl Editor {
             .unwrap_or(language_settings.show_completions_on_input);
         if !menu_is_open && trigger.is_some() && !show_completions_on_input {
             return;
+        }
+
+        if let Some(suppressed_word_start) = self.suppressed_completions_word_start {
+            let current_word_start =
+                Self::completion_word_start(&multibuffer_snapshot, multibuffer_position);
+            if trigger.is_some()
+                && suppressed_word_start.to_offset(&multibuffer_snapshot) == current_word_start
+            {
+                return;
+            }
+            self.suppressed_completions_word_start = None;
         }
 
         let query: Option<Arc<String>> =

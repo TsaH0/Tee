@@ -233,7 +233,9 @@ actions!(
         /// Executes a shell command.
         ShellCommand,
         /// Indicates that an argument is required for the command.
-        ArgumentRequired
+        ArgumentRequired,
+        /// Closes the terminal that `:!` showed its output in.
+        CloseShellOutput
     ]
 );
 
@@ -972,6 +974,35 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
 
     Vim::action(editor, cx, |vim, action: &ShellExec, window, cx| {
         action.run(vim, window, cx)
+    });
+
+    Vim::action(editor, cx, |vim, _: &CloseShellOutput, window, cx| {
+        vim.shell_output_open = false;
+        vim.update_editor(cx, |_, _, cx| cx.notify());
+        let closed = vim.workspace(window, cx).is_some_and(|workspace| {
+            workspace.update(cx, |workspace, cx| {
+                let docks = workspace.all_docks().map(|dock| dock.clone());
+                let mut closed = false;
+                for dock in docks {
+                    let shows_terminal = dock.read(cx).is_open()
+                        && dock
+                            .read(cx)
+                            .active_panel()
+                            .is_some_and(|panel| panel.persistent_name() == "TerminalPanel");
+                    if shows_terminal {
+                        dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+                        closed = true;
+                    }
+                }
+                closed
+            })
+        });
+        if !closed {
+            // The output was already closed, so the key does what it normally does.
+            vim.update_editor(cx, |_, editor, cx| {
+                editor.cancel(&editor::actions::Cancel, window, cx)
+            });
+        }
     })
 }
 
@@ -1758,6 +1789,11 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::new(("delm", "arks"), ArgumentRequired)
             .bang(DeleteMarks::AllLocal)
             .args(|_, args| Some(DeleteMarks::Marks(args).boxed_clone())),
+        VimCommand::new(
+            ("Cp", ""),
+            zed_actions::competitive_programming::RunTests::default(),
+        )
+        .args(|_, args| competitive_programming_command(&args)),
         VimCommand::new(("sor", "t"), SortLinesCaseSensitive)
             .range(select_range)
             .default_range(CommandRange::buffer()),
@@ -1792,6 +1828,59 @@ struct VimCommands(Vec<VimCommand>);
 // actions are not Sync so we can't otherwise use a OnceLock.
 unsafe impl Sync for VimCommands {}
 impl Global for VimCommands {}
+
+/// `:Name args` for a command a runtime plugin registered under `vim`.
+fn plugin_command(input: &str, query: &str, cx: &App) -> CommandInterceptResult {
+    let (name, args) = query
+        .split_once(char::is_whitespace)
+        .map_or((query, ""), |(name, args)| (name, args.trim()));
+    let Some((plugin, command)) = plugin_host::vim_command(name, cx) else {
+        return CommandInterceptResult::default();
+    };
+    let string = input.to_string();
+    CommandInterceptResult {
+        results: vec![CommandInterceptItem {
+            action: plugin_host::RunCommand {
+                plugin,
+                command,
+                args: (!args.is_empty()).then(|| args.to_string()),
+            }
+            .boxed_clone(),
+            positions: generate_positions(&string, query),
+            string,
+        }],
+        exclusive: false,
+    }
+}
+
+/// `:Cp <subcommand> [testcase]`, like `:Cptui` in cptui's Neovim plugin.
+fn competitive_programming_command(args: &str) -> Option<Box<dyn Action>> {
+    use zed_actions::competitive_programming as cp;
+    let mut words = args.split_whitespace();
+    let subcommand = words.next().unwrap_or("run");
+    let argument = words.next();
+    let test = argument.and_then(|test| test.parse::<usize>().ok());
+    Some(match (subcommand, argument) {
+        ("run", _) => cp::RunTests { test }.boxed_clone(),
+        ("receive", None | Some("start")) => cp::StartReceiver.boxed_clone(),
+        ("receive", Some("stop")) => cp::StopReceiver.boxed_clone(),
+        ("receive", Some("status")) => cp::ReceiverStatus.boxed_clone(),
+        ("show", _) => cp::ShowResults.boxed_clone(),
+        ("add", _) => cp::AddTestcase.boxed_clone(),
+        ("edit", _) => cp::EditTestcase {
+            test: test.unwrap_or(1),
+        }
+        .boxed_clone(),
+        ("delete", Some(_)) => cp::DeleteTestcase { test: test? }.boxed_clone(),
+        ("accept", _) => cp::AcceptOutput { test }.boxed_clone(),
+        ("next", _) => cp::NextProblem.boxed_clone(),
+        ("prev", _) => cp::PreviousProblem.boxed_clone(),
+        ("open", _) => cp::OpenProblem.boxed_clone(),
+        ("solutions", _) => cp::OpenSolutions.boxed_clone(),
+        ("url", _) => cp::OpenProblemUrl.boxed_clone(),
+        _ => return None,
+    })
+}
 
 fn commands(cx: &App) -> &Vec<VimCommand> {
     static COMMANDS: OnceLock<VimCommands> = OnceLock::new();
@@ -1833,6 +1922,43 @@ fn wrap_count(action: Box<dyn Action>, range: &CommandRange) -> Option<Box<dyn A
 }
 
 pub fn command_interceptor(
+    input: &str,
+    workspace: WeakEntity<Workspace>,
+    cx: &mut App,
+) -> Task<CommandInterceptResult> {
+    let preview = substitute_command(input).map(|command| command.boxed_clone());
+    crate::plugins::schedule_command_changed(preview, workspace.clone(), cx);
+    intercept_command(input, workspace, cx)
+}
+
+/// Parses `input` if it is a `:substitute` command.
+fn substitute_command(mut input: &str) -> Option<ReplaceCommand> {
+    while input.starts_with(':') {
+        input = &input[1..];
+    }
+    let (range, query) = VimCommand::parse_range(input);
+    let query = query.trim_start();
+    if !query.starts_with('s') || query.starts_with("se ") || query.starts_with("set ") {
+        return None;
+    }
+    let mut substitute = "substitute".chars().peekable();
+    let mut query = query.chars().peekable();
+    while substitute
+        .peek()
+        .is_some_and(|char| Some(char) == query.peek())
+    {
+        substitute.next();
+        query.next();
+    }
+    let replacement = Replacement::parse(query)?;
+    let range = range.unwrap_or(CommandRange {
+        start: Position::CurrentLine { offset: 0 },
+        end: None,
+    });
+    Some(ReplaceCommand { replacement, range })
+}
+
+fn intercept_command(
     mut input: &str,
     workspace: WeakEntity<Workspace>,
     cx: &mut App,
@@ -1975,7 +2101,7 @@ pub fn command_interceptor(
             ))
         })
     else {
-        return Task::ready(CommandInterceptResult::default());
+        return Task::ready(plugin_command(input, query, cx));
     };
 
     if let Some((cmd_idx, parsed_query, display_string, no_args_positions)) = filenames {
@@ -2459,6 +2585,9 @@ impl ShellExec {
         let command = vim.prepare_shell_command(&self.command, window, cx);
 
         if self.range.is_none() && !self.is_read {
+            vim.shell_output_open = true;
+            // The key context comes from the editor's last render.
+            vim.update_editor(cx, |_, _, cx| cx.notify());
             workspace.update(cx, |workspace, cx| {
                 let project = workspace.project().read(cx);
                 let cwd = project.first_project_directory(cx);
