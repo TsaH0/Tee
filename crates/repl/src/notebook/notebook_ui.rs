@@ -1665,6 +1665,14 @@ impl NotebookEditor {
 
 impl Render for NotebookEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The mode follows focus, so that keys typed into a focused cell never
+        // run command mode's single-letter commands, whichever way the cell
+        // got focus.
+        if self.focus_handle.is_focused(window) {
+            self.notebook_mode = NotebookMode::Command;
+        } else if self.focus_handle.contains_focused(window, cx) {
+            self.notebook_mode = NotebookMode::Edit;
+        }
         let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("NotebookEditor");
         key_context.set(
