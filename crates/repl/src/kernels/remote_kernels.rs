@@ -1,5 +1,5 @@
 use futures::{SinkExt as _, channel::mpsc};
-use gpui::{App, AppContext as _, Entity, Task, Window};
+use gpui::{App, Entity, Task, Window};
 use http_client::{AsyncBody, HttpClient, Request};
 use jupyter_protocol::{ExecutionState, JupyterKernelspec, JupyterMessage, KernelInfoReply};
 
@@ -13,7 +13,7 @@ use super::{KernelSession, RunningKernel};
 use anyhow::Result;
 use jupyter_websocket_client::{
     JupyterWebSocket, JupyterWebSocketReader, JupyterWebSocketWriter, KernelLaunchRequest,
-    KernelSpecsResponse, ProtocolMode, RemoteServer,
+    KernelSpecsResponse, ProtocolMode, RemoteServer, binary_protocol::KERNEL_WEBSOCKET_PROTOCOL,
 };
 use std::{fmt::Debug, sync::Arc};
 
@@ -129,8 +129,12 @@ pub async fn connect_to_kernel(
     remote_server: &RemoteServer,
     headers: &[(String, String)],
     kernel_id: &str,
+    client_session: &str,
 ) -> Result<JupyterWebSocket> {
-    let ws_url = kernel_channels_url(remote_server, kernel_id)?;
+    let ws_url = format!(
+        "{}&session_id={client_session}",
+        kernel_channels_url(remote_server, kernel_id)?
+    );
     let mut request: Request<()> = ws_url.into_client_request()?;
     for (name, value) in headers {
         request.headers_mut().insert(
@@ -147,16 +151,32 @@ pub async fn connect_to_kernel(
             std::env::consts::ARCH
         ))?,
     );
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_static(KERNEL_WEBSOCKET_PROTOCOL),
+    );
     // The connector carries the platform's root certificates, which `wss://`
     // servers such as tunnelled Colab runtimes need.
-    let (ws_stream, _response) = connect_async_with_tls_connector(
+    let (ws_stream, response) = connect_async_with_tls_connector(
         request,
         Some(Arc::new(http_client_tls::tls_config()).into()),
     )
     .await?;
+    // Servers that don't know the binary protocol answer without a
+    // subprotocol and speak JSON.
+    let protocol_mode = if response
+        .headers()
+        .get("Sec-WebSocket-Protocol")
+        .is_some_and(|protocol| protocol == KERNEL_WEBSOCKET_PROTOCOL)
+    {
+        ProtocolMode::BinaryV1
+    } else {
+        ProtocolMode::Json
+    };
+    log::info!("remote kernel {kernel_id}: websocket protocol {protocol_mode:?}");
     Ok(JupyterWebSocket {
         inner: ws_stream,
-        protocol_mode: ProtocolMode::Json,
+        protocol_mode,
     })
 }
 
@@ -214,6 +234,11 @@ impl RemoteRunningKernel {
 
         let http_client = cx.http_client();
 
+        // Like Jupyter's own clients, every message carries one session id,
+        // which is also the websocket's `session_id`: proxies such as Colab's
+        // route the kernel's output by it.
+        let client_session = uuid::Uuid::new_v4().to_string();
+
         window.spawn(cx, async move |cx| {
             let kernel_id = launch_remote_kernel(
                 &remote_server,
@@ -238,7 +263,10 @@ impl RemoteRunningKernel {
                 };
                 let kernel_id = kernel_id.clone();
                 let headers = headers.clone();
-                async move { connect_to_kernel(&remote_server, &headers, &kernel_id).await }
+                let client_session = client_session.clone();
+                async move {
+                    connect_to_kernel(&remote_server, &headers, &kernel_id, &client_session).await
+                }
             })
             .await?;
             log::info!("connected to remote kernel {kernel_id}");
@@ -258,6 +286,7 @@ impl RemoteRunningKernel {
                         remote_server,
                         headers,
                         kernel_id,
+                        client_session,
                         request_rx,
                         session,
                         cx,
@@ -301,6 +330,7 @@ async fn keep_connected<S: KernelSession + 'static>(
     remote_server: RemoteServer,
     headers: Vec<(String, String)>,
     kernel_id: String,
+    client_session: String,
     mut requests: mpsc::Receiver<JupyterMessage>,
     session: Entity<S>,
     cx: &mut gpui::AsyncWindowContext,
@@ -322,7 +352,11 @@ async fn keep_connected<S: KernelSession + 'static>(
                     };
                     let headers = headers.clone();
                     let kernel_id = kernel_id.clone();
-                    async move { connect_to_kernel(&remote_server, &headers, &kernel_id).await }
+                    let client_session = client_session.clone();
+                    async move {
+                        connect_to_kernel(&remote_server, &headers, &kernel_id, &client_session)
+                            .await
+                    }
                 })
                 .await;
                 match connected {
@@ -360,6 +394,7 @@ async fn keep_connected<S: KernelSession + 'static>(
         pending.insert(0, keepalive_request(&mut keepalive_ids));
         let mut connection_lost = false;
         for message in pending {
+            let message = outgoing(message, &client_session);
             if let Err(error) = writer.send(message.clone()).await {
                 log::error!(
                     "remote kernel {kernel_id}: can't send {}: {error:#}",
@@ -403,6 +438,7 @@ async fn keep_connected<S: KernelSession + 'static>(
                 },
                 request = requests.next().fuse() => match request {
                     Some(message) => {
+                        let message = outgoing(message, &client_session);
                         log::debug!("remote kernel {kernel_id}: sending {}", message.header.msg_type);
                         if let Err(error) = writer.send(message.clone()).await {
                             log::error!(
@@ -417,7 +453,7 @@ async fn keep_connected<S: KernelSession + 'static>(
                     None => return,
                 },
                 _ = timer => {
-                    let message = keepalive_request(&mut keepalive_ids);
+                    let message = outgoing(keepalive_request(&mut keepalive_ids), &client_session);
                     if writer.send(message).await.is_err() {
                         connection_lost = true;
                     }
@@ -428,6 +464,24 @@ async fn keep_connected<S: KernelSession + 'static>(
             "remote kernel {kernel_id}: connection closed after {received} messages; reconnecting"
         );
     }
+}
+
+/// Gives a message the connection's session and names its channel, which
+/// the server routes it by. Messages are made with a fresh session each and
+/// no channel.
+fn outgoing(mut message: JupyterMessage, client_session: &str) -> JupyterMessage {
+    use jupyter_protocol::{Channel, JupyterMessageContent};
+    message.header.session = client_session.to_string();
+    if message.channel.is_none() {
+        message.channel = Some(match message.content {
+            JupyterMessageContent::InputReply(_) => Channel::Stdin,
+            JupyterMessageContent::ShutdownRequest(_)
+            | JupyterMessageContent::InterruptRequest(_)
+            | JupyterMessageContent::DebugRequest(_) => Channel::Control,
+            _ => Channel::Shell,
+        });
+    }
+    message
 }
 
 /// A `kernel_info_request` whose replies the connection keeps to itself.
@@ -523,6 +577,22 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_outgoing_messages_share_a_session_and_name_their_channel() {
+        use jupyter_protocol::{Channel, ExecuteRequest, InterruptRequest};
+        let execute = outgoing(ExecuteRequest::new("1".to_string()).into(), "client");
+        let interrupt = outgoing(InterruptRequest {}.into(), "client");
+        assert_eq!(execute.header.session, "client");
+        assert_eq!(interrupt.header.session, "client");
+        assert!(matches!(execute.channel, Some(Channel::Shell)));
+        assert!(matches!(interrupt.channel, Some(Channel::Control)));
+        let json = serde_json::to_value(&execute).map_err(anyhow::Error::from);
+        assert_eq!(
+            json.ok().and_then(|json| json.get("channel").cloned()),
+            Some(serde_json::json!("shell"))
+        );
+    }
+
+    #[test]
     fn test_kernel_channels_url() {
         let server = |base_url: &str| RemoteServer {
             base_url: base_url.to_string(),
@@ -543,6 +613,7 @@ mod test {
     }
 
     use crate::kernels::test_support::{start_jupyter_server, wait_for_server};
+    use gpui::AppContext as _;
 
     struct RecordingSession {
         output: Option<futures::channel::oneshot::Sender<String>>,
@@ -718,10 +789,13 @@ mod test {
             let kernel_id =
                 launch_remote_kernel(&remote_server, &[], http_client.clone(), &spec.name, "")
                     .await?;
-            let socket = connect_to_kernel(&remote_server, &[], &kernel_id).await?;
+            let socket = connect_to_kernel(&remote_server, &[], &kernel_id, "test-session").await?;
             let (mut writer, mut reader) = socket.split();
 
-            let request: JupyterMessage = ExecuteRequest::new("print(6 * 7)".to_string()).into();
+            let request = outgoing(
+                ExecuteRequest::new("print(6 * 7)".to_string()).into(),
+                "test-session",
+            );
             writer.send(request).await?;
 
             let output = tokio::time::timeout(Duration::from_secs(60), async {
