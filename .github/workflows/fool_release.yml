@@ -58,7 +58,24 @@ jobs:
           df -h /
       - name: Check out
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      # The runners' default Ubuntu mirror (azure.archive.ubuntu.com) has
+      # stopped resolving for whole builds, so prefer the main archive, keep
+      # Azure's as a fallback, and retry slow downloads.
+      - name: Use a reachable Ubuntu mirror
+        run: |
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+            | sudo tee /etc/apt/apt.conf.d/80-fool-retries
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:2\n' \
+              | sudo tee /etc/apt/apt-mirrors.txt
+          fi
+          for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
+            if [ -f "$file" ]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' "$file"
+            fi
+          done
       - name: Install build dependencies
+        timeout-minutes: 20
         run: ./script/linux
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
