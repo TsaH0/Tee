@@ -1116,6 +1116,23 @@ pub struct VimSettingsContent {
     /// Which modal keymaps are loaded, so that the built-in Vim and Helix
     /// bindings can be replaced by your own.
     pub keymap: Option<VimKeymapSettingsContent>,
+    /// How Helix's `m i` and `m a` find text objects: `"helix"` picks the
+    /// closest pair around or next to the cursor, and `"vim"` follows Vim's
+    /// `i` and `a`, such as `a(` including the parentheses and `aw` the
+    /// space after the word.
+    ///
+    /// Default: "helix"
+    pub helix_text_objects: Option<HelixTextObjectsContent>,
+}
+
+#[derive(
+    Copy, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HelixTextObjectsContent {
+    #[default]
+    Helix,
+    Vim,
 }
 
 /// Settings for the plugins built into Vim and Helix modes.

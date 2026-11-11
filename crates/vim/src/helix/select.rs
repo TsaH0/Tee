@@ -1,3 +1,4 @@
+use settings::Settings as _;
 use text::SelectionGoal;
 use ui::{Context, Window};
 
@@ -14,9 +15,24 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.stop_recording(cx);
+        let vim_objects = crate::VimSettings::get_global(cx).helix_text_objects
+            == settings::HelixTextObjectsContent::Vim;
         self.update_editor(cx, |_, editor, cx| {
             editor.change_selections(Default::default(), window, cx, |s| {
                 s.move_with(&mut |map, selection| {
+                    if vim_objects {
+                        // Vim's objects work from the cursor, which in Helix
+                        // is the first character of a forward selection.
+                        let cursor = cursor_range(selection, map).start;
+                        let mut at_cursor = selection.clone();
+                        at_cursor.start = cursor;
+                        at_cursor.end = cursor;
+                        at_cursor.reversed = false;
+                        if let Some(range) = object.range(map, at_cursor, around, None) {
+                            selection.set_head_tail(range.end, range.start, SelectionGoal::None);
+                        }
+                        return;
+                    }
                     let Some(range) = object.helix_range(map, *selection, around).unwrap_or({
                         let vim_range = object.range(map, *selection, around, None);
                         vim_range.filter(|r| r.start <= cursor_range(selection, map).start)
