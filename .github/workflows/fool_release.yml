@@ -58,22 +58,25 @@ jobs:
           df -h /
       - name: Check out
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      # The runners' default Ubuntu mirror (azure.archive.ubuntu.com) has
-      # stopped resolving for whole builds, so prefer the main archive, keep
-      # Azure's as a fallback, and retry slow downloads.
+      # Ubuntu's own mirrors (azure.archive.ubuntu.com, then archive.ubuntu.com)
+      # have timed out from GitHub's runners for whole builds, so download
+      # from kernel.org's mirror over HTTPS, keep Ubuntu's as fallbacks, and
+      # retry slow downloads.
       - name: Use a reachable Ubuntu mirror
         run: |
+          mirror=https://mirrors.edge.kernel.org/ubuntu/
           printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
             | sudo tee /etc/apt/apt.conf.d/80-fool-retries
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:2\n' \
+            printf '%s\tpriority:1\nhttp://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:3\n' "$mirror" \
               | sudo tee /etc/apt/apt-mirrors.txt
           fi
           for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
             if [ -f "$file" ]; then
-              sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' "$file"
+              sudo sed -i -E "s#https?://(azure\.archive|archive|security)\.ubuntu\.com/ubuntu/?#${mirror}#g" "$file"
             fi
           done
+          grep -rh "^URIs\|^deb " /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
       - name: Install build dependencies
         timeout-minutes: 20
         run: ./script/linux
