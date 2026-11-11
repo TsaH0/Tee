@@ -27,8 +27,8 @@ use futures::{
 };
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    Action, App, AppContext as _, Context, DismissEvent, Entity, Global, Task,
-    WeakEntity, Window, actions,
+    Action, App, AppContext as _, Context, DismissEvent, Entity, Global, Task, WeakEntity, Window,
+    actions,
 };
 use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
@@ -263,7 +263,11 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
             .register_action(|workspace, _: &OpenPluginsFolder, window, cx| {
                 let dir = cx.global::<PluginHost>().dir.clone();
                 if let Err(error) = std::fs::create_dir_all(&dir) {
-                    notify(format!("Failed to create {}: {error}", dir.display()), true, cx);
+                    notify(
+                        format!("Failed to create {}: {error}", dir.display()),
+                        true,
+                        cx,
+                    );
                     return;
                 }
                 workspace
@@ -276,16 +280,19 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
     })
     .detach();
     cx.observe_new(|editor: &mut Editor, _, cx| {
-        cx.subscribe(&cx.entity(), |editor, _, event: &editor::EditorEvent, cx| {
-            let event = match event {
-                editor::EditorEvent::Saved => "saved",
-                editor::EditorEvent::Edited { .. } => "edited",
-                editor::EditorEvent::SelectionsChanged { local: true } => "selection_changed",
-                editor::EditorEvent::Focused => "focused",
-                _ => return,
-            };
-            send_event(event, editor, cx);
-        })
+        cx.subscribe(
+            &cx.entity(),
+            |editor, _, event: &editor::EditorEvent, cx| {
+                let event = match event {
+                    editor::EditorEvent::Saved => "saved",
+                    editor::EditorEvent::Edited { .. } => "edited",
+                    editor::EditorEvent::SelectionsChanged { local: true } => "selection_changed",
+                    editor::EditorEvent::Focused => "focused",
+                    _ => return,
+                };
+                send_event(event, editor, cx);
+            },
+        )
         .detach();
         if cx.has_global::<PluginHost>() {
             send_event("opened", editor, cx);
@@ -314,14 +321,18 @@ pub(crate) fn notify(message: String, is_error: bool, cx: &mut App) {
     if is_error {
         log::error!("plugins: {message}");
     }
-    show_app_notification(NotificationId::unique::<PluginNotification>(), cx, move |cx| {
-        let message = message.clone();
-        cx.new(|cx| {
-            workspace::notifications::simple_message_notification::MessageNotification::new(
-                message, cx,
-            )
-        })
-    });
+    show_app_notification(
+        NotificationId::unique::<PluginNotification>(),
+        cx,
+        move |cx| {
+            let message = message.clone();
+            cx.new(|cx| {
+                workspace::notifications::simple_message_notification::MessageNotification::new(
+                    message, cx,
+                )
+            })
+        },
+    );
 }
 
 fn read_manifests(dir: &Path) -> Vec<(Manifest, PathBuf)> {
@@ -564,7 +575,9 @@ fn run_command(
     let mut context = workspace
         .active_item_as::<Editor>(cx)
         .map(|editor| {
-            editor.update(cx, |editor, cx| api::editor_context(editor, command.wants_text, cx))
+            editor.update(cx, |editor, cx| {
+                api::editor_context(editor, command.wants_text, cx)
+            })
         })
         .unwrap_or_else(|| json!({}));
     context["worktrees"] = Value::Array(
@@ -597,11 +610,12 @@ fn send_event(event: &str, editor: &Editor, cx: &mut App) {
     let Some(path) = editor_path(editor, cx) else {
         return;
     };
-    let language = editor
-        .buffer()
-        .read(cx)
-        .as_singleton()
-        .and_then(|buffer| buffer.read(cx).language().map(|language| language.name().to_string()));
+    let language = editor.buffer().read(cx).as_singleton().and_then(|buffer| {
+        buffer
+            .read(cx)
+            .language()
+            .map(|language| language.name().to_string())
+    });
     broadcast_event(event, json!({ "file": path, "language": language }), cx);
 }
 
@@ -756,12 +770,8 @@ pub(crate) fn show_text(
             return Task::ready(Ok(()));
         }
     }
-    let language = language.map(|language| {
-        workspace
-            .app_state()
-            .languages
-            .language_for_name(&language)
-    });
+    let language =
+        language.map(|language| workspace.app_state().languages.language_for_name(&language));
     cx.spawn_in(window, async move |workspace, cx| {
         let language = match language {
             Some(language) => language.await.log_err(),
@@ -973,7 +983,9 @@ impl PickerDelegate for CommandPickerDelegate {
         let action = entry.action.clone();
         cx.emit(DismissEvent);
         self.workspace
-            .update(cx, |workspace, cx| run_command(workspace, &action, window, cx))
+            .update(cx, |workspace, cx| {
+                run_command(workspace, &action, window, cx)
+            })
             .log_err();
     }
 
@@ -1027,9 +1039,8 @@ mod test {
         let request: PluginRequest =
             serde_json::from_str(r#"{"type":"open","path":"/tmp/a.rs","line":3}"#)?;
         assert!(matches!(request, PluginRequest::Open { line: Some(3), .. }));
-        let request: PluginRequest = serde_json::from_str(
-            r#"{"type":"dispatch","action":"editor::SelectAll"}"#,
-        )?;
+        let request: PluginRequest =
+            serde_json::from_str(r#"{"type":"dispatch","action":"editor::SelectAll"}"#)?;
         assert!(matches!(request, PluginRequest::Dispatch { .. }));
         Ok(())
     }
@@ -1222,7 +1233,8 @@ for message in messages():
         });
         cx.simulate_keystrokes("x shift-y");
         let started = std::time::Instant::now();
-        while editor.update(cx, |editor, cx| editor.text(cx)) != "hello there\n[x][shift-y] line\n" {
+        while editor.update(cx, |editor, cx| editor.text(cx)) != "hello there\n[x][shift-y] line\n"
+        {
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(60),
                 "the plugin didn't handle the keys: {:?}",
@@ -1257,9 +1269,11 @@ for message in messages():
                         predicate.to_string().contains("fool_mode == probe")
                     })
             }));
-            assert!(bindings
-                .iter()
-                .any(|binding| binding.action().name() == "editor::SelectAll"));
+            assert!(
+                bindings
+                    .iter()
+                    .any(|binding| binding.action().name() == "editor::SelectAll")
+            );
             // The last binding of `ctrl-alt-q` now runs the plugin.
             let last = bindings_of(None, cx)
                 .into_iter()
@@ -1332,7 +1346,10 @@ for message in messages():
                 .iter()
                 .map(|plugin| plugin.manifest.name.as_str())
                 .collect::<Vec<_>>();
-            assert!(names.contains(&"ki-mode") && names.contains(&"hello"), "{names:?}");
+            assert!(
+                names.contains(&"ki-mode") && names.contains(&"hello"),
+                "{names:?}"
+            );
             let ki_bindings = plugin_key_bindings(cx)
                 .into_iter()
                 .filter(|binding| binding.action().name() == "plugins::RunCommand")
@@ -1394,7 +1411,12 @@ for message in messages():
         }
 
         run("enter", None, cx);
-        wait_until(cx, |cx| selected(cx) == "let", "Ki mode to select the first word").await;
+        wait_until(
+            cx,
+            |cx| selected(cx) == "let",
+            "Ki mode to select the first word",
+        )
+        .await;
         editor.update(cx, |editor, _| {
             let mode = editor
                 .addon::<api::PluginModeAddon>()
@@ -1404,15 +1426,22 @@ for message in messages():
         // Ki mode's keys resolve in the editor's real key context.
         let ki_key = editor.update_in(cx, |editor, window, cx| {
             let key_context = editor.key_context(window, cx);
-            assert_eq!(key_context.get("fool_mode").map(|mode| mode.as_ref()), Some("ki"));
+            assert_eq!(
+                key_context.get("fool_mode").map(|mode| mode.as_ref()),
+                Some("ki")
+            );
             let keystroke = gpui::Keystroke::parse_with_os("l", gpui::OperatingSystem::Linux)
                 .expect("a keystroke");
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
             let (bindings, _) = keymap.bindings_for_input(&[keystroke], &[key_context]);
-            bindings
-                .first()
-                .and_then(|binding| binding.action().as_any().downcast_ref::<RunCommand>().cloned())
+            bindings.first().and_then(|binding| {
+                binding
+                    .action()
+                    .as_any()
+                    .downcast_ref::<RunCommand>()
+                    .cloned()
+            })
         });
         assert_eq!(
             ki_key.map(|action| action.command).as_deref(),
@@ -1423,7 +1452,12 @@ for message in messages():
         run("next", None, cx);
         wait_until(cx, |cx| selected(cx) == "total", "the next word").await;
         run("extend_next", None, cx);
-        wait_until(cx, |cx| selected(cx) == "total =", "extending the selection").await;
+        wait_until(
+            cx,
+            |cx| selected(cx) == "total =",
+            "extending the selection",
+        )
+        .await;
         run("delete", None, cx);
         wait_until(
             cx,
@@ -1432,7 +1466,12 @@ for message in messages():
         )
         .await;
         run("unit", Some("line"), cx);
-        wait_until(cx, |cx| selected(cx) == "let  price * 2", "selecting the line").await;
+        wait_until(
+            cx,
+            |cx| selected(cx) == "let  price * 2",
+            "selecting the line",
+        )
+        .await;
         run("leave", None, cx);
         wait_until(
             cx,
@@ -1590,7 +1629,9 @@ for message in messages():
         let b_file = util::path!("/project/b.txt");
         std::fs::write(
             plugin_dir.join("probe.py"),
-            EMACS_PROBE.replace("A_FILE", a_file).replace("B_FILE", b_file),
+            EMACS_PROBE
+                .replace("A_FILE", a_file)
+                .replace("B_FILE", b_file),
         )
         .expect("the plugin");
 
@@ -1658,8 +1699,11 @@ for message in messages():
             )
         });
 
-        wait_for_log(&plugin_dir, r#"decorate {"type": "response", "id": 1, "result": null}"#)
-            .await;
+        wait_for_log(
+            &plugin_dir,
+            r#"decorate {"type": "response", "id": 1, "result": null}"#,
+        )
+        .await;
         wait_for_log(&plugin_dir, "bad color True").await;
         wait_for_log(
             &plugin_dir,
@@ -1708,9 +1752,9 @@ for message in messages():
 
         // The scratch buffer is editable and has the plugin's mode.
         let scratch = workspace.update(cx, |workspace, cx| {
-            workspace.items_of_type::<Editor>(cx).find(|editor| {
-                editor.read(cx).buffer().read(cx).title(cx) == "Scratch"
-            })
+            workspace
+                .items_of_type::<Editor>(cx)
+                .find(|editor| editor.read(cx).buffer().read(cx).title(cx) == "Scratch")
         });
         let scratch = scratch.expect("the scratch buffer");
         scratch.update(cx, |editor, cx| {
@@ -1766,7 +1810,12 @@ for message in messages():
         workspace.update_in(cx, |workspace, window, cx| {
             let pane = workspace.active_pane().clone();
             pane.update(cx, |pane, cx| {
-                pane.close_item_by_id(b_editor.entity_id(), workspace::SaveIntent::Skip, window, cx)
+                pane.close_item_by_id(
+                    b_editor.entity_id(),
+                    workspace::SaveIntent::Skip,
+                    window,
+                    cx,
+                )
             })
             .detach_and_log_err(cx);
         });
@@ -1787,5 +1836,144 @@ for message in messages():
             });
         });
         wait_for_log(&plugin_dir, r#"new settings {"greeting": "hello"}"#).await;
+    }
+
+    const LSP_PROBE: &str = r##"
+import json, os, sys
+
+initialize = json.loads(sys.stdin.readline())
+log = []
+
+def record(entry):
+    log.append(entry)
+    with open("log.json.tmp", "w") as file:
+        json.dump(log, file)
+    os.replace("log.json.tmp", "log.json")
+
+def request(message, id):
+    message["id"] = id
+    print(json.dumps(message), flush=True)
+    while True:
+        reply = json.loads(sys.stdin.readline())
+        if reply.get("type") == "response" and reply.get("id") == id:
+            return reply
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("type") == "command":
+        record("echo " + json.dumps(request({"type": "lsp_request", "method": "fool/echo",
+            "params": {"word": "hi"}}, 1).get("result")))
+        record("named " + str("error" in request({"type": "lsp_request", "method": "fool/echo",
+            "server": "missing"}, 2)))
+"##;
+
+    enum FoolEcho {}
+
+    impl lsp::request::Request for FoolEcho {
+        type Params = Value;
+        type Result = Value;
+        const METHOD: &'static str = "fool/echo";
+    }
+
+    /// Plugins send any request, including a server's own extensions, to
+    /// the language server of a file.
+    #[gpui::test]
+    async fn test_lsp_request(cx: &mut gpui::TestAppContext) {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 isn't installed");
+            return;
+        }
+        let plugins = tempfile::tempdir().expect("a temporary directory");
+        let plugin_dir = plugins.path().join("lsp_probe");
+        std::fs::create_dir_all(&plugin_dir).expect("the plugin directory");
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name": "lsp_probe", "run": ["python3", "probe.py"], "start": "startup",
+                "commands": [{"name": "go"}]}"#,
+        )
+        .expect("the manifest");
+        std::fs::write(plugin_dir.join("probe.py"), LSP_PROBE).expect("the plugin");
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            json!({ "main.rs": "fn main() {}\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+        language_registry.add(std::sync::Arc::new(language::Language::new(
+            language::LanguageConfig {
+                name: "Rust".into(),
+                matcher: language::LanguageMatcher {
+                    path_suffixes: vec!["rs".into()],
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            None,
+        )));
+        let mut fake_servers =
+            language_registry.register_fake_lsp("Rust", language::FakeLspAdapter::default());
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the workspace");
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| init_with_dir(plugins.path().to_path_buf(), cx));
+
+        let _buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer_with_lsp(util::path!("/project/main.rs"), cx)
+            })
+            .await
+            .expect("main.rs should open");
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(util::path!("/project/main.rs")),
+                    OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("main.rs should open in an editor");
+        let fake_server = futures::StreamExt::next(&mut fake_servers)
+            .await
+            .expect("the language server");
+        fake_server.set_request_handler::<FoolEcho, _, _>(|params, _| async move {
+            Ok(json!({ "echoed": params }))
+        });
+        // The server counts as running once it answers `initialize`.
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            run_command(
+                workspace,
+                &RunCommand {
+                    plugin: "lsp_probe".into(),
+                    command: "go".into(),
+                    args: None,
+                },
+                window,
+                cx,
+            )
+        });
+        wait_for_log(&plugin_dir, r#"echo {"echoed": {"word": "hi"}}"#).await;
+        wait_for_log(&plugin_dir, "named True").await;
     }
 }

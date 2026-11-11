@@ -13594,6 +13594,7 @@ dependencies = [
  "gpui",
  "language",
  "log",
+ "lsp",
  "multi_buffer",
  "paths",
  "picker",

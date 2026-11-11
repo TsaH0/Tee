@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, anyhow};
 use editor::{Editor, MultiBufferOffset, MultiBufferSnapshot};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    App, Focusable as _, Context, DismissEvent, Entity, IntoElement, KeyBinding, KeyContext,
+    App, Context, DismissEvent, Entity, Focusable as _, IntoElement, KeyBinding, KeyContext,
     ParentElement as _, Render, Task, WeakEntity, Window,
 };
 use language::{CursorShape, DiagnosticSeverity, Point};
@@ -263,6 +263,19 @@ pub(crate) enum PluginRequest {
         #[serde(default)]
         file: Option<PathBuf>,
     },
+    /// Sends any request, `method` with `params`, to the language server of
+    /// an editor's file, including a server's own extensions to the
+    /// protocol. With several servers, `server` picks one by name. The
+    /// result is the server's.
+    LspRequest {
+        method: String,
+        #[serde(default)]
+        params: Value,
+        #[serde(default)]
+        file: Option<PathBuf>,
+        #[serde(default)]
+        server: Option<String>,
+    },
     /// Runs a shell command in the terminal panel. The result is its exit
     /// code once it finishes, or `null` if it couldn't run.
     RunInTerminal {
@@ -380,7 +393,10 @@ pub(crate) fn position_of(snapshot: &MultiBufferSnapshot, point: Point) -> Value
 }
 
 pub(crate) fn point_of(snapshot: &MultiBufferSnapshot, position: Position) -> Point {
-    let row = position.line.saturating_sub(1).min(snapshot.max_point().row);
+    let row = position
+        .line
+        .saturating_sub(1)
+        .min(snapshot.max_point().row);
     let line_end = Point::new(row, snapshot.line_len(multi_buffer::MultiBufferRow(row)));
     let mut remaining = position.column.saturating_sub(1) as usize;
     let mut column = 0;
@@ -559,9 +575,28 @@ pub(crate) fn apply_request(
             options,
         } => {
             // Answer once the buffer exists, so that the plugin can use it.
-            let shown = show_text(&plugin, title, text, language, options, workspace, window, cx);
+            let shown = show_text(
+                &plugin, title, text, language, options, workspace, window, cx,
+            );
             cx.spawn(async move |_, cx| {
                 let result = shown.await.map(|()| Value::Null);
+                cx.update(|cx| responder.respond(result, cx));
+            })
+            .detach();
+            return;
+        }
+        PluginRequest::LspRequest {
+            method,
+            params,
+            file,
+            server,
+        } => {
+            let request = lsp_request(&method, params, file, server, workspace, cx);
+            cx.spawn(async move |_, cx| {
+                let result = match request {
+                    Ok(request) => request.await.into_response(),
+                    Err(error) => Err(error),
+                };
                 cx.update(|cx| responder.respond(result, cx));
             })
             .detach();
@@ -624,7 +659,11 @@ fn apply_immediate(
 ) -> Result<Value> {
     match request {
         PluginRequest::Notify { message, level } => {
-            notify(format!("{plugin}: {message}"), level.as_deref() == Some("error"), cx);
+            notify(
+                format!("{plugin}: {message}"),
+                level.as_deref() == Some("error"),
+                cx,
+            );
         }
         PluginRequest::Open { path, line, column } => {
             let open = workspace.open_abs_path(path, OpenOptions::default(), window, cx);
@@ -694,7 +733,10 @@ fn apply_immediate(
             ));
         }
         PluginRequest::SetSelections { selections, file } => {
-            anyhow::ensure!(!selections.is_empty(), "there must be at least one selection");
+            anyhow::ensure!(
+                !selections.is_empty(),
+                "there must be at least one selection"
+            );
             let editor = target_editor(workspace, file.as_deref(), cx)?;
             editor.update(cx, |editor, cx| {
                 let snapshot = editor.buffer().read(cx).snapshot(cx);
@@ -731,7 +773,10 @@ fn apply_immediate(
             let editor = target_editor(workspace, file.as_deref(), cx)?;
             let shape = cursor.as_deref().map(cursor_shape).transpose()?;
             editor.update(cx, |editor, cx| {
-                let mut addon = editor.addon::<PluginModeAddon>().cloned().unwrap_or_default();
+                let mut addon = editor
+                    .addon::<PluginModeAddon>()
+                    .cloned()
+                    .unwrap_or_default();
                 addon.mode = mode;
                 editor.register_addon(addon);
                 if let Some(shape) = shape {
@@ -746,6 +791,7 @@ fn apply_immediate(
         PluginRequest::Pick { .. }
         | PluginRequest::Prompt { .. }
         | PluginRequest::Show { .. }
+        | PluginRequest::LspRequest { .. }
         | PluginRequest::RunInTerminal { .. } => {
             unreachable!("handled by apply_request")
         }
@@ -796,7 +842,10 @@ fn apply_immediate(
             );
             let editor = target_editor(workspace, file.as_deref(), cx)?;
             editor.update(cx, |editor, cx| {
-                let mut addon = editor.addon::<PluginModeAddon>().cloned().unwrap_or_default();
+                let mut addon = editor
+                    .addon::<PluginModeAddon>()
+                    .cloned()
+                    .unwrap_or_default();
                 if enabled {
                     addon.minor_modes.insert(name);
                 } else {
@@ -815,8 +864,8 @@ fn apply_immediate(
             return Ok(settings.unwrap_or(Value::Object(Default::default())));
         }
         PluginRequest::UpdateSettings { settings } => {
-            let patch: settings::SettingsContent = serde_json::from_value(settings)
-                .context("the settings aren't valid")?;
+            let patch: settings::SettingsContent =
+                serde_json::from_value(settings).context("the settings aren't valid")?;
             let fs = workspace.app_state().fs.clone();
             settings::update_settings_file(fs, cx, move |settings, _| {
                 settings.merge_from(&patch);
@@ -890,7 +939,9 @@ fn apply_immediate(
         PluginRequest::ClearDecorations { namespace, file } => {
             let editor = target_editor(workspace, file.as_deref(), cx)?;
             let namespace = namespace_id(plugin, &namespace, cx);
-            editor.update(cx, |editor, cx| editor.clear_plugin_decorations(namespace, cx));
+            editor.update(cx, |editor, cx| {
+                editor.clear_plugin_decorations(namespace, cx)
+            });
         }
         PluginRequest::GetBuffers {} => {
             let active = workspace.active_item_as::<Editor>(cx);
@@ -1057,6 +1108,41 @@ pub(crate) fn capture_keystroke(
     let message = json!({ "type": "key", "key": key, "mode": mode }).to_string();
     crate::send_to_plugin(&plugin, message, cx);
     true
+}
+
+fn lsp_request(
+    method: &str,
+    params: Value,
+    file: Option<PathBuf>,
+    server: Option<String>,
+    workspace: &Workspace,
+    cx: &mut App,
+) -> Result<impl std::future::Future<Output = util::ConnectionResult<Value>> + use<>> {
+    let editor = target_editor(workspace, file.as_deref(), cx)?;
+    let buffer = editor
+        .read(cx)
+        .buffer()
+        .read(cx)
+        .as_singleton()
+        .context("the editor shows more than one file")?;
+    let lsp_store = workspace.project().read(cx).lsp_store();
+    let language_server = buffer.update(cx, |buffer, cx| {
+        lsp_store.update(cx, |lsp_store, cx| {
+            lsp_store
+                .running_language_servers_for_local_buffer(buffer, cx)
+                .map(|(_, server)| server.clone())
+                .find(|candidate| {
+                    server
+                        .as_deref()
+                        .is_none_or(|name| AsRef::<str>::as_ref(&candidate.name()) == name)
+                })
+        })
+    });
+    let language_server = language_server.with_context(|| match &server {
+        Some(name) => format!("no language server named {name} runs for this file"),
+        None => "no language server runs for this file".to_string(),
+    })?;
+    Ok(language_server.request_by_method(method, params, std::time::Duration::from_secs(60)))
 }
 
 pub(crate) fn parse_keymap(source: &str, cx: &App) -> Result<Vec<KeyBinding>> {

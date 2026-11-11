@@ -23,8 +23,8 @@ Put each plugin in its own folder under `~/.config/zed/plugins/` with a
   "run": ["python3", "hello.py"],
   // "on_command" (default) starts it when one of its commands is first used.
   "start": "on_command",
-  // Editor events to receive: "saved", "opened", "edited",
-  // "selection_changed" and "focused".
+  // Editor events to receive: "saved", "opened", "closed", "edited",
+  // "selection_changed", "focused" and "action".
   "events": ["saved"],
   // Key bindings that load with the plugin, in keymap.json format.
   "keymap": "keymap.json",
@@ -65,14 +65,25 @@ The editor sends:
 
 | Message | Fields |
 |---------|--------|
-| `initialize` | `protocol_version` (2), `editor` ("fool"), `plugin_dir`, `config_dir` |
+| `initialize` | `protocol_version` (3), `editor` ("fool"), `plugin_dir`, `config_dir`, `data_dir` (a folder of the plugin's own for anything it keeps), `settings` |
 | `command` | `id`, `command`, `args` (text after the ex command, or from the binding), `context` |
-| `event` | `event`, `data.file` |
+| `event` | `event`, `data` (`file` and `language`; `action` and `key` for `action` events) |
+| `settings` | `settings`, sent when the plugin's settings change |
+| `pick_query` | `pick`, `query`, as the user types in a `live` picker |
 | `response` | `id`, and `result` or `error`, answering a request that had an `id` |
 | `key` | `key` (like `"j"` or `"ctrl-shift-k"`), `mode` | A keystroke in a mode the plugin captures |
 
 Events are only sent to plugins that list them under `events` in
-`plugin.json`: `saved`, `opened`, `edited`, `selection_changed` and `focused`.
+`plugin.json`: `saved`, `opened`, `closed`, `edited`, `selection_changed`,
+`focused`, and `action`, sent for every action run from a key, like Emacs's
+`post-command-hook`.
+
+A plugin's settings are what `settings.json` has under its name in `"plugins"`,
+like Emacs's `defcustom`:
+
+```json
+{ "plugins": { "hello": { "greeting": "hi" } } }
+```
 
 `context` (also the result of `get_editor`) has `file`, `language`, `cursor`,
 `selections` (each with `start`, `end` and `text`; `end` is where the cursor
@@ -85,15 +96,18 @@ so it can also run its own servers or watchers. Give a request an `id` to get a
 plugin waits for a response, commands and events can still arrive, so keep
 them to handle afterwards (as `docs/plugins/ki-mode` does).
 
+Requests marked † take an optional `file`: a path, or the title of a buffer
+the plugin showed, to work on that open editor instead of the active one.
+
 | Request | Fields | Effect and result |
 |---------|--------|-------------------|
-| `get_editor` | `text` (bool) | The active editor's `context`, or `null` |
-| `get_text` | `start`, `end` (optional positions) | The text |
-| `set_selections` | `selections`: `[{start, end}]` | Selects; `end` before `start` selects backwards |
-| `edit` | `edits`: `[{start, end, text}]` | Replaces the ranges as one undoable edit |
+| `get_editor` † | `text` (bool) | The editor's `context`, or `null` |
+| `get_text` † | `start`, `end` (optional positions) | The text |
+| `set_selections` † | `selections`: `[{start, end}]` | Selects; `end` before `start` selects backwards |
+| `edit` † | `edits`: `[{start, end, text}]` | Replaces the ranges as one undoable edit |
 | `insert` | `text` | Replaces the selections (or inserts at the cursors) |
 | `set_text` | `text` | Replaces the whole text |
-| `set_mode` | `mode` (string or `null`), `cursor` (`block`, `bar`, `underline`, `hollow`) | Gives the active editor a mode that key bindings can match with `fool_mode == <mode>` |
+| `set_mode` † | `mode` (string or `null`), `cursor` (`block`, `bar`, `underline`, `hollow`) | Gives the active editor a mode that key bindings can match with `fool_mode == <mode>` |
 | `bind_keys` | `keymap` (`keymap.json` format) | Adds key bindings |
 | `get_bindings` | `action` (optional) | Every binding (or `action`'s): `keys`, `context`, `action`, lowest precedence first |
 | `override_action` | `action`, `command`, `args` | Every key bound to `action` runs the plugin's `command` instead, in the same contexts |
@@ -102,14 +116,22 @@ them to handle afterwards (as `docs/plugins/ki-mode` does).
 | `dispatch` | `action`, `args` | Runs any action, such as `"editor::SelectAll"` or `"vim::SwitchToInsertMode"` |
 | `get_actions` | | The names of every action |
 | `set_status` | `text` (string or `null`) | Shows text in the status bar |
-| `pick` | `items`, `placeholder` | Asks the user to pick an item; the result is its index, or `null` |
+| `pick` | `items` (strings, or `{label, description}`), `placeholder`, `live` | Asks the user to pick an item; the result is its index, or `null`. A `live` picker asks the plugin for items as the user types (`pick_query`) |
+| `update_pick` | `pick`, `items` | Answers a `pick_query`: replaces a live picker's items |
 | `prompt` | `placeholder` | Asks the user to type; the result is the text, or `null` |
 | `notify` | `message`, `level` ("info" or "error") | Shows a notification |
 | `open` | `path`, `line`, `column` | Opens a file, optionally at a position |
-| `show` | `title`, `text`, `language` | Shows text in a read-only tab, replacing an earlier `show` with the same title |
+| `show` | `title`, `text`, `language`, `editable`, `mode`, `split` (`right` or `down`) | Shows text in a tab, replacing an earlier `show` with the same title. With `editable` and `mode`, it's an interactive buffer with its own keys, like an Emacs special buffer |
+| `get_buffers` | | The open editors: `file`, `title`, `language`, `dirty`, `active` |
+| `set_decorations` † | `namespace`, `highlights`: `[{start, end, color, background, underline, wavy, strikethrough, bold, italic}]`, `virtual_text`: `[{position, text, color, …}]` | Highlights text and shows virtual text, replacing what `namespace` showed before; both follow edits. Colors are `#rrggbb[aa]` or `error`, `warning`, `info`, `hint`, `success`, `created`, `deleted`, `modified`, `accent`, `muted` |
+| `clear_decorations` † | `namespace` | Removes them |
+| `register_command` | `name`, `description`, `vim` | Adds a command while the plugin runs |
+| `set_minor_mode` † | `name`, `enabled` | Turns on a minor mode, which key bindings match like a context: `"Editor && my_mode"` |
+| `run_in_terminal` | `command`, `cwd` | Runs a shell command in the terminal panel; the result is its exit code, like Emacs's `compile` |
+| `lsp_request` † | `method`, `params`, `server` | Sends any request, including a server's own extensions, to the file's language server; the result is the server's |
 | `get_settings` | | Your `settings.json` |
 | `update_settings` | `settings` | Merges into `settings.json`, for anything settings control |
-| `get_diagnostics` | | The active editor's diagnostics: `start`, `end`, `severity`, `message`, `source` |
+| `get_diagnostics` † | | The active editor's diagnostics: `start`, `end`, `severity`, `message`, `source` |
 
 ### Deciding what keys do
 
@@ -149,8 +171,31 @@ Plugins control keys at three levels, from simplest to most flexible:
   `"theme"`).
 - **Language servers**: `update_settings` with `"lsp"` and `"languages"`
   configures which servers run and how; `get_diagnostics` reads their results,
-  and actions such as `editor::GoToDefinition`, `editor::Hover` and
-  `editor::Format` drive them.
+  `lsp_request` asks them anything, and actions such as
+  `editor::GoToDefinition`, `editor::Hover` and `editor::Format` drive them.
+
+### Compared to Emacs
+
+| Emacs | Fool plugins |
+|-------|--------------|
+| Keymaps, major modes, `define-key` | Key bindings, `set_mode`, `bind_keys` |
+| Minor modes | `set_minor_mode` |
+| Advice | `override_action`, then `dispatch` the original |
+| Reading every key (`read-key`) | `capture_keys` |
+| Hooks (`after-save-hook`, `post-command-hook`, …) | `events` |
+| Overlays and text properties | `set_decorations` |
+| Special buffers (`*compilation*`, Magit) | `show` with `editable` and `mode` |
+| `completing-read`, Consult | `pick`, live pickers |
+| `M-x` commands defined at runtime | `register_command` |
+| `defcustom` | `"plugins"` settings |
+| `compile`, `shell-command` | `run_in_terminal` |
+| Talking to LSP servers (Eglot) | `lsp_request` |
+
+What plugins still can't do: draw arbitrary UI of their own (only the status
+bar, pickers, prompts, notifications, buffers and decorations), add syntax
+grammars or language servers (that's what Zed extensions do), or change the
+editor's own code: they run as separate programs, not inside the editor like
+Emacs Lisp.
 
 A plugin's `keymap` file (named in `plugin.json`) loads with it. Your own
 `keymap.json` loads after plugins, so it can still override any plugin binding.
