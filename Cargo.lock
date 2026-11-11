@@ -13604,6 +13604,7 @@ dependencies = [
  "serde_json_lenient",
  "settings",
  "smol",
+ "task",
  "tempfile",
  "theme",
  "theme_settings",

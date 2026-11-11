@@ -1117,6 +1117,9 @@ pub struct Editor {
     /// typing more of that word doesn't reopen the menu.
     suppressed_completions_word_start: Option<Anchor>,
     substitute_preview_inlays: Vec<InlayId>,
+    /// What each plugin decoration namespace added: how many text and
+    /// virtual text styles it used, and its virtual text.
+    plugin_decorations: HashMap<u32, PluginDecorations>,
     menu_edit_predictions_policy: MenuEditPredictionsPolicy,
     edit_prediction_preview: EditPredictionPreview,
     in_leading_whitespace: bool,
@@ -1289,6 +1292,13 @@ pub struct EditorSnapshot {
     current_line_highlight: CurrentLineHighlight,
     gutter_hovered: bool,
     semantic_tokens_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PluginDecorations {
+    text_styles: u32,
+    inlay_styles: u32,
+    inlays: Vec<InlayId>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2535,6 +2545,7 @@ impl Editor {
             show_completions_on_input_override: None,
             suppressed_completions_word_start: None,
             substitute_preview_inlays: Vec::new(),
+            plugin_decorations: HashMap::default(),
             menu_edit_predictions_policy: MenuEditPredictionsPolicy::ByProvider,
             edit_prediction_settings: EditPredictionSettings::Disabled,
             in_leading_whitespace: false,
@@ -9911,6 +9922,124 @@ impl Editor {
             map.highlight_text(key, ranges, style, false, cx)
         });
         cx.notify();
+    }
+
+    /// Replaces the decorations of a plugin's `namespace`: text highlighted
+    /// with a style, and virtual text shown at a position. Both follow edits.
+    pub fn set_plugin_decorations(
+        &mut self,
+        namespace: u32,
+        highlights: Vec<(Range<Anchor>, HighlightStyle)>,
+        virtual_text: Vec<(Anchor, String, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_plugin_decorations(namespace, cx);
+
+        // Each distinct style needs its own highlight key.
+        let mut text_styles: Vec<(HighlightStyle, Vec<Range<Anchor>>)> = Vec::new();
+        for (range, style) in highlights {
+            match text_styles.iter_mut().find(|(existing, _)| *existing == style) {
+                Some((_, ranges)) => ranges.push(range),
+                None => text_styles.push((style, vec![range])),
+            }
+        }
+        let text_style_count = text_styles.len() as u32;
+        for (index, (style, ranges)) in text_styles.into_iter().enumerate() {
+            self.highlight_text(
+                HighlightKey::Plugin {
+                    namespace,
+                    style: index as u32,
+                },
+                ranges,
+                style,
+                cx,
+            );
+        }
+
+        let mut inlays = Vec::new();
+        let mut inlay_styles: Vec<(HighlightStyle, Vec<InlayHighlight>)> = Vec::new();
+        for (position, text, style) in virtual_text {
+            if text.is_empty() {
+                continue;
+            }
+            let inlay = Inlay::edit_prediction(post_inc(&mut self.next_inlay_id), position, text);
+            let highlight = InlayHighlight {
+                inlay: inlay.id,
+                inlay_position: inlay.position,
+                range: 0..inlay.text().len(),
+            };
+            match inlay_styles.iter_mut().find(|(existing, _)| *existing == style) {
+                Some((_, highlights)) => highlights.push(highlight),
+                None => inlay_styles.push((style, vec![highlight])),
+            }
+            inlays.push(inlay);
+        }
+        let inlay_ids = inlays.iter().map(|inlay| inlay.id).collect::<Vec<_>>();
+        self.splice_inlays(&[], inlays, cx);
+        let inlay_style_count = inlay_styles.len() as u32;
+        for (index, (style, highlights)) in inlay_styles.into_iter().enumerate() {
+            self.highlight_inlays(
+                HighlightKey::PluginInlay {
+                    namespace,
+                    style: index as u32,
+                },
+                highlights,
+                style,
+                cx,
+            );
+        }
+
+        self.plugin_decorations.insert(
+            namespace,
+            PluginDecorations {
+                text_styles: text_style_count,
+                inlay_styles: inlay_style_count,
+                inlays: inlay_ids,
+            },
+        );
+        cx.notify();
+    }
+
+    pub fn clear_plugin_decorations(&mut self, namespace: u32, cx: &mut Context<Self>) {
+        let Some(decorations) = self.plugin_decorations.remove(&namespace) else {
+            return;
+        };
+        for style in 0..decorations.text_styles {
+            self.clear_highlights(HighlightKey::Plugin { namespace, style }, cx);
+        }
+        for style in 0..decorations.inlay_styles {
+            self.clear_highlights(HighlightKey::PluginInlay { namespace, style }, cx);
+        }
+        if !decorations.inlays.is_empty() {
+            self.splice_inlays(&decorations.inlays, Vec::new(), cx);
+        }
+    }
+
+    /// The text ranges a plugin decoration namespace highlights.
+    pub fn plugin_highlight_ranges(&self, namespace: u32, cx: &App) -> Vec<Range<Anchor>> {
+        let Some(decorations) = self.plugin_decorations.get(&namespace) else {
+            return Vec::new();
+        };
+        (0..decorations.text_styles)
+            .filter_map(|style| {
+                self.text_highlights(HighlightKey::Plugin { namespace, style }, cx)
+                    .map(|(_, ranges)| ranges.to_vec())
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The virtual text a plugin decoration namespace shows.
+    pub fn plugin_virtual_text(&self, namespace: u32, cx: &App) -> Vec<String> {
+        let Some(decorations) = self.plugin_decorations.get(&namespace) else {
+            return Vec::new();
+        };
+        self.display_map
+            .read(cx)
+            .current_inlays()
+            .filter(|inlay| decorations.inlays.contains(&inlay.id))
+            .map(|inlay| inlay.text().to_string())
+            .collect()
     }
 
     /// Previews a search and replace: each range is struck through and its

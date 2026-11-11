@@ -191,6 +191,10 @@ pub enum HighlightKey {
     SyntaxTreeView(usize),
     VimExchange,
     VimSubstitutePreview,
+    /// Text a plugin decorated, by namespace and style.
+    Plugin { namespace: u32, style: u32 },
+    /// Virtual text a plugin added, by namespace and style.
+    PluginInlay { namespace: u32, style: u32 },
 }
 
 pub trait ToDisplayPoint {

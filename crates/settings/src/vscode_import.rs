@@ -242,6 +242,7 @@ impl VsCodeSettings {
             title_bar: None,
             vim: None,
             competitive_programming: None,
+            plugins: None,
             vim_mode: None,
             workspace: self.workspace_settings_content(),
             which_key: None,
