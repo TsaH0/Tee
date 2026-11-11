@@ -17,8 +17,8 @@ use language::{Language, LanguageRegistry};
 use log;
 use project::{Project, ProjectEntryId, ProjectPath};
 use settings::Settings as _;
-use util::ResultExt as _;
 use ui::{CommonAnimationExt, KeyBinding, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::item::{ItemEvent, SaveOptions, TabContentParams};
 use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemHandle, Pane, ProjectItem, ToolbarItemLocation};
@@ -223,16 +223,23 @@ impl NotebookEditor {
         editor
     }
 
-    fn subscribe_to_cell(cell_id: &CellId, cell: &Cell, window: &mut Window, cx: &mut Context<Self>) {
+    fn subscribe_to_cell(
+        cell_id: &CellId,
+        cell: &Cell,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match cell {
             Cell::Code(code_cell) => {
                 let cell_id_for_focus = cell_id.clone();
-                cx.subscribe_in(code_cell, window, move |this, _cell, event, window, cx| {
-                    match event {
+                cx.subscribe_in(
+                    code_cell,
+                    window,
+                    move |this, _cell, event, window, cx| match event {
                         CellEvent::Run(cell_id) => this.execute_cell(cell_id.clone(), window, cx),
                         CellEvent::FocusedIn(_) => this.select_cell_by_id(&cell_id_for_focus, cx),
-                    }
-                })
+                    },
+                )
                 .detach();
 
                 let cell_id_for_editor = cell_id.clone();
@@ -994,7 +1001,8 @@ impl NotebookEditor {
             // The list caches each item's height by index.
             self.cell_list.splice(index - 1..index + 1, 2);
             self.selected_cell_index -= 1;
-            self.cell_list.scroll_to_reveal_item(self.selected_cell_index);
+            self.cell_list
+                .scroll_to_reveal_item(self.selected_cell_index);
             cx.notify();
         }
     }
@@ -1005,7 +1013,8 @@ impl NotebookEditor {
             self.cell_order.swap(index, index + 1);
             self.cell_list.splice(index..index + 2, 2);
             self.selected_cell_index += 1;
-            self.cell_list.scroll_to_reveal_item(self.selected_cell_index);
+            self.cell_list
+                .scroll_to_reveal_item(self.selected_cell_index);
             cx.notify();
         }
     }
@@ -1710,11 +1719,15 @@ impl Render for NotebookEditor {
             .on_action(cx.listener(|this, _: &PasteCellBelow, window, cx| {
                 this.paste_cell(false, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &PasteCellAbove, window, cx| {
-                this.paste_cell(true, window, cx)
-            }))
             .on_action(
-                cx.listener(|this, _: &UndoDeleteCell, window, cx| this.undo_delete_cell(window, cx)),
+                cx.listener(|this, _: &PasteCellAbove, window, cx| {
+                    this.paste_cell(true, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &UndoDeleteCell, window, cx| {
+                    this.undo_delete_cell(window, cx)
+                }),
             )
             .on_action(cx.listener(|this, _: &RunAllAbove, window, cx| {
                 this.run_cells_in(0..this.selected_cell_index, window, cx)
@@ -2687,7 +2700,11 @@ mod cell_action_tests {
         cx: &'a mut TestAppContext,
         notebook: String,
         kernel: Option<KernelSpecification>,
-    ) -> (Entity<NotebookEditor>, Entity<Project>, &'a mut VisualTestContext) {
+    ) -> (
+        Entity<NotebookEditor>,
+        Entity<Project>,
+        &'a mut VisualTestContext,
+    ) {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(path!("/notebooks"), json!({ "test.ipynb": notebook }))
             .await;
@@ -2787,7 +2804,10 @@ mod cell_action_tests {
         editor.update_in(cx, |editor, window, cx| {
             editor.change_cell_kind(NewCellKind::Markdown, window, cx)
         });
-        assert_eq!(cells(&editor, cx)[1], ("markdown".to_string(), String::new()));
+        assert_eq!(
+            cells(&editor, cx)[1],
+            ("markdown".to_string(), String::new())
+        );
         editor.update_in(cx, |editor, window, cx| {
             editor.delete_cell(window, cx);
             editor.delete_cell(window, cx);
@@ -2815,7 +2835,11 @@ mod cell_action_tests {
         });
         assert_eq!(
             cells(&editor, cx),
-            expected(&[("code", "x = 1"), ("code", "x = 1"), ("markdown", "# Title")])
+            expected(&[
+                ("code", "x = 1"),
+                ("code", "x = 1"),
+                ("markdown", "# Title")
+            ])
         );
         editor.read_with(cx, |editor, _| {
             assert_ne!(
@@ -2833,7 +2857,11 @@ mod cell_action_tests {
         editor.update_in(cx, |editor, window, cx| editor.paste_cell(true, window, cx));
         assert_eq!(
             cells(&editor, cx),
-            expected(&[("markdown", "# Title"), ("code", "x = 1"), ("code", "x = 1")])
+            expected(&[
+                ("markdown", "# Title"),
+                ("code", "x = 1"),
+                ("code", "x = 1")
+            ])
         );
 
         // Moving cells.
@@ -2889,7 +2917,11 @@ mod cell_action_tests {
         receiver.await.ok();
     }
 
-    fn cell_stdout(editor: &Entity<NotebookEditor>, index: usize, cx: &mut VisualTestContext) -> String {
+    fn cell_stdout(
+        editor: &Entity<NotebookEditor>,
+        index: usize,
+        cx: &mut VisualTestContext,
+    ) -> String {
         editor.read_with(cx, |editor, cx| {
             let Some(Cell::Code(cell)) = editor
                 .cell_order
@@ -2898,7 +2930,8 @@ mod cell_action_tests {
             else {
                 return String::new();
             };
-            let nbformat::v4::Cell::Code { outputs, .. } = cell.read(cx).to_nbformat_cell(cx) else {
+            let nbformat::v4::Cell::Code { outputs, .. } = cell.read(cx).to_nbformat_cell(cx)
+            else {
                 return String::new();
             };
             outputs
@@ -2936,8 +2969,7 @@ mod cell_action_tests {
     #[gpui::test]
     async fn test_notebook_runs_on_a_remote_kernel(cx: &mut TestAppContext) {
         let token = "fool-test-token";
-        let Some((_server, base_url)) =
-            crate::kernels::test_support::start_jupyter_server(token)
+        let Some((_server, base_url)) = crate::kernels::test_support::start_jupyter_server(token)
         else {
             eprintln!("skipping: jupyter isn't installed (set JUPYTER_TEST_BIN)");
             return;
@@ -2952,16 +2984,20 @@ mod cell_action_tests {
             gpui_tokio::init(cx);
             cx.set_http_client(http_client.clone());
         });
-        let remote_server = jupyter_websocket_client::RemoteServer::from_url(&format!(
-            "{base_url}/?token={token}"
-        ))
-        .expect("the URL should parse");
-        let spec = crate::kernels::list_remote_kernelspecs("local".into(), remote_server, http_client)
-            .await
-            .expect("the server should list its kernels")
-            .into_iter()
-            .find(|spec| spec.kernelspec.language == "python")
-            .expect("the server should have a Python kernel");
+        let remote_server =
+            jupyter_websocket_client::RemoteServer::from_url(&format!("{base_url}/?token={token}"))
+                .expect("the URL should parse");
+        let spec = crate::kernels::list_remote_kernelspecs(
+            "local".into(),
+            remote_server,
+            Vec::new(),
+            http_client,
+        )
+        .await
+        .expect("the server should list its kernels")
+        .into_iter()
+        .find(|spec| spec.kernelspec.language == "python")
+        .expect("the server should have a Python kernel");
 
         let notebook = notebook_json(&[
             ("code", "a = 6"),
@@ -3001,7 +3037,9 @@ mod cell_action_tests {
         wait_for_stdout(&editor, 2, "7", cx).await;
 
         // Restarting forgets `a`, and running all defines it again first.
-        editor.update_in(cx, |editor, window, cx| editor.restart_and_run_all(window, cx));
+        editor.update_in(cx, |editor, window, cx| {
+            editor.restart_and_run_all(window, cx)
+        });
         let pending_kernel = editor.read_with(cx, |editor, _| match &editor.kernel {
             Kernel::StartingKernel(task) => Some(task.clone()),
             _ => None,
@@ -3113,7 +3151,9 @@ mod keymap_tests {
             ("space n y", "notebook::ChangeCellToCode"),
             ("space n s", "notebook::SelectKernel"),
             ("space n j", "repl::ConnectToJupyterServer"),
-            ("space n g", "repl::ConnectToColab"),
+            ("space n g", "repl::NewColabRuntime"),
+            ("space n d", "repl::DeleteColabRuntime"),
+            ("space n t", "repl::ConnectToColab"),
         ];
         let command_mode = [
             ("j", "menu::SelectNext"),

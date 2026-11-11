@@ -1041,6 +1041,22 @@ pub struct JupyterContent {
     ///
     /// Default: `[]`
     pub servers: Option<Vec<JupyterServerContent>>,
+
+    /// The Google OAuth client that signs in to Google Colab, to create
+    /// Colab runtimes and run notebooks on them.
+    pub colab: Option<ColabContent>,
+}
+
+/// A Google OAuth client of type "Desktop app", from a Google Cloud project
+/// with the Colab API enabled.
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
+pub struct ColabContent {
+    /// The client ID, ending in `.apps.googleusercontent.com`.
+    pub client_id: Option<String>,
+    /// The client secret, which Google doesn't treat as secret for desktop
+    /// apps.
+    pub client_secret: Option<String>,
 }
 
 /// A remote Jupyter server.

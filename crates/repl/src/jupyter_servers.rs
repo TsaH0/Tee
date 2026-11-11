@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, DismissEvent, Task, WeakEntity,
-    Window, actions,
+    App, AppContext as _, ClipboardItem, Context, DismissEvent, Task, WeakEntity, Window, actions,
 };
 use jupyter_websocket_client::RemoteServer;
 use picker::{Picker, PickerDelegate};
@@ -118,7 +117,7 @@ fn parse_server_url(url: &str, kind: ServerKind) -> anyhow::Result<(String, Remo
     Ok((name, server))
 }
 
-fn notify(message: String, cx: &mut App) {
+pub(crate) fn notify(message: String, cx: &mut App) {
     struct JupyterServerNotification;
     workspace::notifications::show_app_notification(
         NotificationId::unique::<JupyterServerNotification>(),
@@ -144,7 +143,7 @@ fn connect(url: String, kind: ServerKind, cx: &mut App) {
     let fs = ReplStore::global(cx).read(cx).fs().clone();
     let url = url.trim().to_string();
     cx.spawn(async move |cx| {
-        let result = list_remote_kernelspecs(name.clone(), server, http_client).await;
+        let result = list_remote_kernelspecs(name.clone(), server, Vec::new(), http_client).await;
         cx.update(|cx| match result {
             Ok(kernels) => {
                 let kernel_names = kernels
@@ -208,7 +207,9 @@ impl PickerDelegate for ServerPromptDelegate {
             ServerKind::Colab => {
                 "Run the copied cell in Colab, then paste the URL it prints…".into()
             }
-            ServerKind::Jupyter => "Paste a Jupyter server URL, like http://host:8888/?token=…".into(),
+            ServerKind::Jupyter => {
+                "Paste a Jupyter server URL, like http://host:8888/?token=…".into()
+            }
         }
     }
 
@@ -263,9 +264,11 @@ mod test {
 
     #[test]
     fn test_parse_server_url() {
-        let (name, server) =
-            parse_server_url(" https://abc-def.trycloudflare.com/?token=xyz ", ServerKind::Colab)
-                .expect("a Colab URL should parse");
+        let (name, server) = parse_server_url(
+            " https://abc-def.trycloudflare.com/?token=xyz ",
+            ServerKind::Colab,
+        )
+        .expect("a Colab URL should parse");
         assert_eq!(name, "Colab");
         assert_eq!(server.base_url, "https://abc-def.trycloudflare.com/");
         assert_eq!(server.token, "xyz");
@@ -297,7 +300,10 @@ mod test {
             eprintln!("skipping: python3 isn't installed");
             return;
         };
-        assert!(output.status.success(), "the Colab cell should parse as Python");
+        assert!(
+            output.status.success(),
+            "the Colab cell should parse as Python"
+        );
         assert!(COLAB_RUNTIME_CELL.contains("/?token={token}"));
     }
 }

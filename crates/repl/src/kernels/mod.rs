@@ -812,7 +812,10 @@ pub(crate) mod test_support {
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        Some((JupyterServerProcess(child), format!("http://127.0.0.1:{port}")))
+        Some((
+            JupyterServerProcess(child),
+            format!("http://127.0.0.1:{port}"),
+        ))
     }
 
     /// Blocks until something listens on the server's port.
@@ -828,5 +831,4 @@ pub(crate) mod test_support {
         }
         Ok(())
     }
-
 }

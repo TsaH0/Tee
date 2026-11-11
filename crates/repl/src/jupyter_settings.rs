@@ -8,6 +8,13 @@ use settings::{RegisterSetting, Settings};
 pub struct JupyterSettings {
     pub kernel_selections: HashMap<String, String>,
     pub servers: Vec<JupyterServer>,
+    pub colab_client: Option<ColabClient>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColabClient {
+    pub id: String,
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +47,16 @@ impl Settings for JupyterSettings {
                 })
             })
             .collect();
+        let colab_client = jupyter.colab.and_then(|colab| {
+            Some(ColabClient {
+                id: colab.client_id.filter(|id| !id.trim().is_empty())?,
+                secret: colab.client_secret.unwrap_or_default(),
+            })
+        });
         Self {
             kernel_selections: jupyter.kernel_selections.unwrap_or_default(),
             servers,
+            colab_client,
         }
     }
 }

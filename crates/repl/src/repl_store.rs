@@ -63,6 +63,11 @@ impl ReplStore {
                     }
                 }
             }),
+            cx.observe_global::<crate::colab::ColabRuntimes>(|this, cx| {
+                if this.kernelspecs_initialized {
+                    this.refresh_kernelspecs(cx).detach_and_log_err(cx);
+                }
+            }),
             cx.on_app_quit(Self::shutdown_all_sessions),
         ];
 
@@ -222,9 +227,10 @@ impl ReplStore {
         })
     }
 
-    /// The Jupyter servers in the settings, plus one from the
-    /// `JUPYTER_SERVER` and `JUPYTER_TOKEN` environment variables.
-    fn jupyter_servers(cx: &App) -> Vec<(String, RemoteServer)> {
+    /// The Jupyter servers in the settings and the Colab runtimes, plus one
+    /// from the `JUPYTER_SERVER` and `JUPYTER_TOKEN` environment variables,
+    /// each with the headers its requests need.
+    fn jupyter_servers(cx: &App) -> Vec<(String, RemoteServer, Vec<(String, String)>)> {
         let mut servers = Vec::new();
         if let (Ok(base_url), Ok(token)) = (
             std::env::var("JUPYTER_SERVER"),
@@ -233,14 +239,16 @@ impl ReplStore {
             servers.push((
                 crate::jupyter_settings::url_host(&base_url),
                 RemoteServer { base_url, token },
+                Vec::new(),
             ));
         }
         for server in &JupyterSettings::get_global(cx).servers {
             match RemoteServer::from_url(&server.url) {
-                Ok(remote_server) => servers.push((server.name.clone(), remote_server)),
+                Ok(remote_server) => servers.push((server.name.clone(), remote_server, Vec::new())),
                 Err(error) => log::error!("invalid Jupyter server {}: {error:#}", server.name),
             }
         }
+        servers.extend(crate::colab::jupyter_servers(cx));
         servers
     }
 
@@ -255,11 +263,16 @@ impl ReplStore {
         let http_client = cx.http_client();
         Some(cx.spawn(async move |_, _| {
             let mut specs = Vec::new();
-            for (name, remote_server) in servers {
+            for (name, remote_server, headers) in servers {
                 // One unreachable server, such as a Colab runtime that has
                 // shut down, shouldn't hide the others.
-                match list_remote_kernelspecs(name.clone(), remote_server, http_client.clone())
-                    .await
+                match list_remote_kernelspecs(
+                    name.clone(),
+                    remote_server,
+                    headers,
+                    http_client.clone(),
+                )
+                .await
                 {
                     Ok(server_specs) => specs.extend(
                         server_specs

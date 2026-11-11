@@ -314,26 +314,54 @@ you connect to.
 
 ### Running on Colab's GPUs and CPUs
 
-1. Run `repl: connect to colab` (`space n g` in a notebook). This copies a cell
-   to your clipboard and opens a prompt.
-2. In a Google Colab notebook, choose the runtime you want (for example a T4 GPU
-   under *Runtime → Change runtime type*), paste the cell into a code cell and
-   run it. It starts a Jupyter server in the runtime, behind a free Cloudflare
-   tunnel, and prints a URL like `https://….trycloudflare.com/?token=…`.
-3. Paste that URL into Fool's prompt and press `enter`. Fool checks that the
-   server answers and saves it as `Colab` under `jupyter.servers`.
-4. In your notebook, pick the `Colab` kernel in the kernel picker. Cells now run
-   on the Colab runtime, so `!nvidia-smi` or `torch.cuda.is_available()` see its
-   GPU.
+Fool talks to Google's [Colab API](https://developers.google.com/colab/api), as
+Google's Colab extension for VS Code does: sign in with Google, pick a GPU, TPU
+or CPU, and cells run there. No browser tab needs to stay open.
 
-Keep the Colab tab open: Colab stops idle runtimes, and a new runtime needs the
-cell run again, which prints a new URL. Connecting again replaces the old
-`Colab` entry. The runtime's files are its own, so upload data to it (or mount
-Google Drive in the Colab tab) rather than expecting your local files there.
+**Once:** Google only lets apps it knows sign in, so make Fool an OAuth client of
+your own. It's free:
 
-This works through Colab's ordinary notebook runtime. Google's VS Code extension
-signs in to Colab directly, which needs Google's own sign-in client, so Fool
-connects through the tunnel instead.
+1. In the [Google Cloud console](https://console.cloud.google.com), create a
+   project (or pick one).
+2. Enable the **Colab API** for it: *APIs & Services → Library*, search for
+   "Colab API" and click *Enable*.
+3. Under *Google Auth Platform*, set up the consent screen: user type
+   *External*, and add your Google account under *Audience → Test users*.
+4. Under *Clients*, create a client of type **Desktop app**, and put its ID and
+   secret in your settings:
+
+   ```json
+   {
+     "jupyter": {
+       "colab": {
+         "client_id": "123-abc.apps.googleusercontent.com",
+         "client_secret": "GOCSPX-…"
+       }
+     }
+   }
+   ```
+
+**Each time:**
+
+1. Run `repl: new colab runtime` (`space n g` in a notebook). The first time,
+   your browser opens to sign in with Google; Google warns that it hasn't
+   verified the app, since it's your own, so continue. Fool keeps the sign-in in
+   your system keychain.
+2. Pick a runtime, like `T4 GPU` or `CPU`. Only those your account can use are
+   listed, and Colab Pro adds more.
+3. When Fool says it's ready, pick the runtime's kernel (`Colab T4 GPU …`) in
+   the notebook's kernel picker (`space n s`). `!nvidia-smi` or
+   `torch.cuda.is_available()` now see the GPU.
+
+Runtimes you already have reconnect when Fool starts, and Fool refreshes their
+short-lived tokens. Colab still stops idle runtimes and limits how long they
+run, as in the browser. `repl: delete colab runtime` (`space n d`) frees one,
+and `repl: sign out of colab` forgets the sign-in. The runtime's files are its
+own, so upload data to it rather than expecting your local files there.
+
+Without an OAuth client, `repl: connect to colab` (`space n t`) still works
+through a Colab tab: it copies a cell that starts a Jupyter server behind a
+Cloudflare tunnel; run it in a Colab notebook and paste the URL it prints.
 
 `repl: connect to jupyter server` (`space n j`) connects to any other Jupyter
 server the same way, given the URL with its token that `jupyter server` prints.
@@ -379,7 +407,8 @@ cell's normal mode to get there) and an edit mode for typing in a cell (`i`,
 | Restart the kernel | `space n k` | `0 0`, `ctrl-shift-r` |
 | Restart and run all | `space n shift-r` | |
 | Pick a kernel | `space n s` | |
-| Connect to Colab / a Jupyter server | `space n g` / `space n j` | |
+| New / delete Colab runtime | `space n g` / `space n d` | |
+| Connect to Colab through a tab / a Jupyter server | `space n t` / `space n j` | |
 
 The `space n` keys also work inside a cell in normal mode, and every action is
 in the command palette under `notebook:`.
