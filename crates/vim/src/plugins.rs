@@ -11,8 +11,8 @@ use editor::{
     NavigationTargetOverlay,
 };
 use gpui::{
-    Action, AnyWindowHandle, App, Context, Focusable as _, Keystroke, Subscription,
-    WeakEntity, Window, px,
+    Action, AnyWindowHandle, App, Context, Focusable as _, Keystroke, Subscription, WeakEntity,
+    Window, px,
 };
 use language::{Point, Selection};
 use multi_buffer::ToOffset as _;
@@ -124,8 +124,8 @@ impl Settings for VimPluginSettings {
             .keys
             .unwrap_or_else(|| vec!["j".to_string(), "k".to_string()])
             .into_iter()
-            .filter(|key| {
-                match Keystroke::parse_with_os(key, gpui::OperatingSystem::Linux) {
+            .filter(
+                |key| match Keystroke::parse_with_os(key, gpui::OperatingSystem::Linux) {
                     Ok(_) => true,
                     Err(error) => {
                         log::error!(
@@ -133,8 +133,8 @@ impl Settings for VimPluginSettings {
                         );
                         false
                     }
-                }
-            })
+                },
+            )
             .collect();
 
         Self {
@@ -149,10 +149,7 @@ impl Settings for VimPluginSettings {
 
 impl Vim {
     /// Runs `hook` on each plugin until one returns true.
-    fn run_plugins(
-        &mut self,
-        mut hook: impl FnMut(&mut dyn VimPlugin, &mut Vim) -> bool,
-    ) -> bool {
+    fn run_plugins(&mut self, mut hook: impl FnMut(&mut dyn VimPlugin, &mut Vim) -> bool) -> bool {
         // Plugins are taken out while they run so that they can borrow `self`.
         let mut plugins = std::mem::take(&mut self.plugins);
         let handled = plugins.iter_mut().any(|plugin| hook(plugin.as_mut(), self));
@@ -166,14 +163,18 @@ impl Vim {
             let Some(vim) = vim.upgrade() else {
                 return;
             };
+            // Every editor has a Vim, so only the focused one does any work.
+            let focused = vim
+                .read(cx)
+                .editor()
+                .is_some_and(|editor| editor.focus_handle(cx).is_focused(window));
+            if !focused {
+                return;
+            }
             let consumed = vim.update(cx, |vim, cx| {
-                let focused = vim
-                    .editor()
-                    .is_some_and(|editor| editor.focus_handle(cx).is_focused(window));
-                focused
-                    && vim.run_plugins(|plugin, vim| {
-                        plugin.intercept_keystroke(vim, &event.keystroke, window, cx)
-                    })
+                vim.run_plugins(|plugin, vim| {
+                    plugin.intercept_keystroke(vim, &event.keystroke, window, cx)
+                })
             });
             if consumed {
                 cx.stop_propagation();
@@ -376,7 +377,11 @@ impl VimPlugin for FlashFind {
         let (Some(key), None) = (key.next(), key.next()) else {
             return false;
         };
-        let Some(target) = active.targets.into_iter().find(|target| target.label == key) else {
+        let Some(target) = active
+            .targets
+            .into_iter()
+            .find(|target| target.label == key)
+        else {
             return false;
         };
         let origin = active.origin;
@@ -406,8 +411,7 @@ impl VimPlugin for FlashFind {
             return;
         }
         let labels = settings.flash_find_labels.clone();
-        let ([origin_selection], Some(find)) = (origin, FindParameters::from_motion(motion))
-        else {
+        let ([origin_selection], Some(find)) = (origin, FindParameters::from_motion(motion)) else {
             return;
         };
         let label_color = cx.theme().colors().vim_helix_jump_label_foreground;
@@ -416,8 +420,7 @@ impl VimPlugin for FlashFind {
             let snapshot = editor.snapshot(window, cx);
             let display_snapshot = &snapshot.display_snapshot;
             let buffer = display_snapshot.buffer_snapshot();
-            let visible_range =
-                Vim::visible_jump_range(editor, &snapshot, display_snapshot, cx);
+            let visible_range = Vim::visible_jump_range(editor, &snapshot, display_snapshot, cx);
             let visible_start = buffer.point_to_offset(visible_range.start);
             // The visible range ends at the start of the last visible line.
             let last_row = visible_range.end.row.min(buffer.max_point().row);
@@ -429,16 +432,15 @@ impl VimPlugin for FlashFind {
             // Motions start from the character under the cursor, which in a
             // forward selection is the one before the head.
             let head = origin_selection.head().to_offset(buffer);
-            let cursor = if origin_selection.reversed
-                || origin_selection.start == origin_selection.end
-            {
-                head
-            } else {
-                head - buffer
-                    .reversed_chars_at(head)
-                    .next()
-                    .map_or(0, |character| character.len_utf8())
-            };
+            let cursor =
+                if origin_selection.reversed || origin_selection.start == origin_selection.end {
+                    head
+                } else {
+                    head - buffer
+                        .reversed_chars_at(head)
+                        .next()
+                        .map_or(0, |character| character.len_utf8())
+                };
 
             let mut forward = Vec::new();
             let mut backward = Vec::new();
@@ -585,7 +587,8 @@ impl VimPlugin for SubstitutePreview {
         cx: &mut Context<Vim>,
     ) {
         let command = command.and_then(|command| command.as_any().downcast_ref::<ReplaceCommand>());
-        let Some(command) = command.filter(|_| VimPluginSettings::get_global(cx).substitute_preview_enabled)
+        let Some(command) =
+            command.filter(|_| VimPluginSettings::get_global(cx).substitute_preview_enabled)
         else {
             self.clear(vim, cx);
             return;
@@ -659,8 +662,8 @@ impl VimPlugin for SubstitutePreview {
                 last_replaced_row = Some(row);
                 let mut replaced = String::new();
                 captures.expand(&replacement_text, &mut replaced);
-                let range = buffer.anchor_before(match_start)
-                    ..buffer.anchor_after(start + found.end());
+                let range =
+                    buffer.anchor_before(match_start)..buffer.anchor_after(start + found.end());
                 replacements.push((range, replaced));
                 if replacements.len() >= 2000 {
                     break;
@@ -898,9 +901,7 @@ mod completion_test {
     }
 
     #[gpui::test]
-    async fn test_slow_completions_dont_reopen_after_exiting_insert(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn test_slow_completions_dont_reopen_after_exiting_insert(cx: &mut gpui::TestAppContext) {
         let mut cx = context_with_completions(cx, false).await;
         let executor = cx.executor();
         cx.set_request_handler::<lsp::request::Completion, _, _>(move |_, _, _| {
@@ -973,9 +974,7 @@ mod completion_test {
     }
 
     #[gpui::test]
-    async fn test_jk_after_exiting_insert_with_completions_in_helix(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn test_jk_after_exiting_insert_with_completions_in_helix(cx: &mut gpui::TestAppContext) {
         let mut cx = context_with_completions(cx, true).await;
         assert_keys_move_after_exiting(&mut cx, "ctrl-c", Mode::HelixNormal).await;
         assert_keys_move_after_exiting(&mut cx, "escape", Mode::HelixNormal).await;

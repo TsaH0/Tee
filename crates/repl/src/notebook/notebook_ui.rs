@@ -165,10 +165,7 @@ impl NotebookEditor {
         let language_name = notebook_item.read(cx).language_name();
         let worktree_id = notebook_item.read(cx).project_path.worktree_id;
 
-        let notebook_language = notebook_item.read(cx).notebook_language();
-        let notebook_language = cx
-            .spawn_in(window, async move |_, _| notebook_language.await)
-            .shared();
+        let notebook_language = resolve_language(notebook_item.read(cx).notebook_language(), cx);
 
         let mut cell_order = vec![]; // Vec<CellId>
         let mut cell_map = HashMap::default(); // HashMap<CellId, Cell>
@@ -447,8 +444,14 @@ impl NotebookEditor {
 
     fn refresh_language(&mut self, cx: &mut Context<Self>) {
         let notebook_language = self.notebook_item.read(cx).notebook_language();
+        let current = self.notebook_language.clone();
         let task = cx.spawn(async move |this, cx| {
-            let language = notebook_language.await;
+            // A kernel that reports a language Fool doesn't know keeps the
+            // highlighting the cells have rather than clearing it.
+            let Some(language) = notebook_language.await else {
+                return current.await;
+            };
+            let language = Some(language);
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     for cell in this.cell_map.values() {
@@ -1997,17 +2000,27 @@ impl NotebookItem {
                 .and_then(|spec| spec.language.clone()))
     }
 
+    /// The language of the notebook's code cells. Notebooks without
+    /// language metadata, like new ones, are almost always Python, and
+    /// guessing so highlights them before a kernel says what they are.
     pub fn notebook_language(&self) -> impl Future<Output = Option<Arc<Language>>> + use<> {
-        let language_name = self.language_name();
-        let languages = self.languages.clone();
+        let language_name = self.language_name().unwrap_or_else(|| "Python".to_string());
+        let language = self.languages.language_for_name(&language_name);
+        async move { language.await.ok() }
+    }
+}
 
-        async move {
-            if let Some(language_name) = language_name {
-                languages.language_for_name(&language_name).await.ok()
-            } else {
-                None
-            }
-        }
+/// Shares the notebook's language, already resolved when the language is
+/// loaded, so that cells get it as they're created instead of showing plain
+/// text for a frame.
+fn resolve_language(
+    language: impl Future<Output = Option<Arc<Language>>> + Send + 'static,
+    cx: &mut App,
+) -> Shared<Task<Option<Arc<Language>>>> {
+    let mut language = Box::pin(language);
+    match (&mut language).now_or_never() {
+        Some(language) => Task::ready(language).shared(),
+        None => cx.background_spawn(language).shared(),
     }
 }
 
@@ -2777,6 +2790,170 @@ mod cell_action_tests {
         editor.update_in(cx, |editor, window, cx| {
             editor.set_selected_index(index, false, window, cx)
         });
+    }
+
+    /// The language of the first code cell's buffer, and whether its text
+    /// has syntax highlighting right now.
+    fn code_cell_highlighting(
+        editor: &Entity<NotebookEditor>,
+        cx: &mut VisualTestContext,
+    ) -> (Option<String>, bool) {
+        editor.read_with(cx, |editor, cx| {
+            let Some(Cell::Code(cell)) = editor
+                .cell_order
+                .first()
+                .and_then(|cell_id| editor.cell_map.get(cell_id))
+            else {
+                return (None, false);
+            };
+            let buffer = cell.read(cx).editor().read(cx).buffer().read(cx);
+            let Some(buffer) = buffer.as_singleton() else {
+                return (None, false);
+            };
+            let buffer = buffer.read(cx);
+            let language = buffer
+                .language()
+                .map(|language| language.name().to_string());
+            let snapshot = buffer.snapshot();
+            let highlighted = snapshot
+                .chunks(
+                    0..snapshot.len(),
+                    language::LanguageAwareStyling {
+                        tree_sitter: true,
+                        diagnostics: false,
+                    },
+                )
+                .any(|chunk| chunk.syntax_highlight_id.is_some());
+            (language, highlighted)
+        })
+    }
+
+    /// A notebook without language metadata, like a new one, is highlighted
+    /// as Python as soon as it opens, while typing, and after a kernel
+    /// reports a language Fool doesn't know.
+    #[gpui::test]
+    async fn test_highlighting_stays_uniform(cx: &mut TestAppContext) {
+        init(cx);
+        let notebook = json!({
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "cells": [{
+                "cell_type": "code", "id": "cell-0", "metadata": {},
+                "execution_count": null, "outputs": [], "source": ["print('hi')"],
+            }],
+        })
+        .to_string();
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/notebooks"), json!({ "test.ipynb": notebook }))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/notebooks").as_ref()], cx).await;
+        project.read_with(cx, |project, _| {
+            project.languages().add(languages::language(
+                "python",
+                tree_sitter_python::LANGUAGE.into(),
+            ))
+        });
+        // Syntax colors come from the theme, as in the app.
+        let theme = cx.update(|cx| theme::GlobalTheme::theme(cx).clone());
+        project.read_with(cx, |project, _| project.languages().set_theme(theme));
+        // Load the grammar the way opening any Python file first would.
+        project
+            .read_with(cx, |project, _| {
+                project.languages().language_for_name("Python")
+            })
+            .await
+            .expect("Python is registered");
+        cx.update(|cx| ReplStore::init(fs.clone(), cx));
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        let notebook_item = cx
+            .update(|cx| {
+                NotebookItem::try_open(
+                    &project,
+                    &ProjectPath {
+                        worktree_id,
+                        path: rel_path("test.ipynb").into(),
+                    },
+                    cx,
+                )
+                .expect("ipynb files should open as notebooks")
+            })
+            .await
+            .expect("the notebook should parse");
+        let cx = cx.add_empty_window();
+        let editor = cx.update(|window, cx| {
+            cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item.clone(), window, cx))
+        });
+
+        // Highlighted before anything else runs.
+        assert_eq!(
+            code_cell_highlighting(&editor, cx),
+            (Some("Python".to_string()), true)
+        );
+
+        // Typing keeps the highlighting, even before reparsing finishes.
+        let cell_editor = editor.read_with(cx, |editor, cx| {
+            editor
+                .cell_order
+                .first()
+                .and_then(|cell_id| editor.cell_map.get(cell_id))
+                .and_then(|cell| match cell {
+                    Cell::Code(cell) => Some(cell.read(cx).editor().clone()),
+                    _ => None,
+                })
+                .expect("the code cell")
+        });
+        for text in ["\n", "x", " = ", "1"] {
+            cell_editor.update_in(cx, |cell_editor, window, cx| {
+                cell_editor.move_to_end(&Default::default(), window, cx);
+                cell_editor.insert(text, window, cx);
+            });
+            assert_eq!(
+                code_cell_highlighting(&editor, cx),
+                (Some("Python".to_string()), true),
+                "after typing {text:?}"
+            );
+        }
+        cx.run_until_parked();
+
+        // A kernel reporting an unknown language leaves it alone.
+        notebook_item.update(cx, |item, cx| {
+            item.notebook.metadata.language_info =
+                serde_json::from_value(json!({"name": "klingon"})).ok();
+            cx.emit(());
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            code_cell_highlighting(&editor, cx),
+            (Some("Python".to_string()), true)
+        );
+
+        // A new cell is highlighted from the start.
+        editor.update_in(cx, |editor, window, cx| {
+            editor.set_selected_index(0, false, window, cx);
+            editor.insert_new_cell(NewCellKind::Code, true, window, cx);
+        });
+        let new_cell_language = editor.read_with(cx, |editor, cx| {
+            editor
+                .cell_order
+                .first()
+                .and_then(|cell_id| editor.cell_map.get(cell_id))
+                .and_then(|cell| match cell {
+                    Cell::Code(cell) => cell
+                        .read(cx)
+                        .editor()
+                        .read(cx)
+                        .buffer()
+                        .read(cx)
+                        .as_singleton()
+                        .and_then(|buffer| buffer.read(cx).language().cloned()),
+                    _ => None,
+                })
+                .map(|language| language.name().to_string())
+        });
+        assert_eq!(new_cell_language.as_deref(), Some("Python"));
     }
 
     #[gpui::test]

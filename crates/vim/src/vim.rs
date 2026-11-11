@@ -18,8 +18,8 @@ mod replace;
 mod rewrap;
 mod state;
 mod surrounds;
-mod visual;
 mod vim_regex;
+mod visual;
 
 use crate::normal::paste::Paste as VimPaste;
 use collections::HashMap;
