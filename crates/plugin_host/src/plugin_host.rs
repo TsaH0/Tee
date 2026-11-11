@@ -14,7 +14,10 @@ pub use api::plugin_key_bindings;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -122,8 +125,28 @@ struct Plugin {
     running: Option<RunningPlugin>,
 }
 
+/// Most events waiting to be written to a plugin. A plugin that stops
+/// reading its stdin misses events past this, instead of the editor keeping
+/// every one of them in memory.
+const MAX_QUEUED_EVENTS: usize = 1024;
+
+/// Messages to a running plugin, counted until they're written.
+#[derive(Clone)]
+struct PluginSender {
+    sender: UnboundedSender<String>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl PluginSender {
+    fn send(&self, message: String) {
+        if self.sender.unbounded_send(message).is_ok() {
+            self.queued.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 struct RunningPlugin {
-    messages: UnboundedSender<String>,
+    messages: PluginSender,
     _child: Child,
     _tasks: Vec<Task<()>>,
 }
@@ -239,9 +262,10 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         if let Some(window) = window {
             let item = cx.new(|_| api::PluginStatusItem);
-            cx.global_mut::<PluginHost>()
-                .status_items
-                .push(api::status_item_handle(&item));
+            let status_items = &mut cx.global_mut::<PluginHost>().status_items;
+            // Closed windows leave their items behind.
+            status_items.retain(|item| item.upgrade().is_some());
+            status_items.push(api::status_item_handle(&item));
             workspace.status_bar().update(cx, |status_bar, cx| {
                 status_bar.add_right_item(item, window, cx);
             });
@@ -306,6 +330,9 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
         let Some(action) = &event.action else {
             return;
         };
+        if !wants_event("action", cx) {
+            return;
+        }
         let os = cx.platform_info().os;
         broadcast_event(
             "action",
@@ -420,7 +447,7 @@ pub fn vim_command(name: &str, cx: &App) -> Option<(String, String)> {
     })
 }
 
-fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
+fn ensure_running(name: &str, cx: &mut App) -> Result<PluginSender> {
     let plugin = cx
         .global::<PluginHost>()
         .plugins
@@ -448,7 +475,12 @@ fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
     let stdin = child.stdin.take().context("plugin has no stdin")?;
     let stdout = child.stdout.take().context("plugin has no stdout")?;
     let stderr = child.stderr.take().context("plugin has no stderr")?;
-    let (messages, mut outgoing) = mpsc::unbounded::<String>();
+    let (sender, mut outgoing) = mpsc::unbounded::<String>();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let messages = PluginSender {
+        sender,
+        queued: queued.clone(),
+    };
 
     let plugin_name = name.to_string();
     let writer = cx.background_spawn({
@@ -456,6 +488,7 @@ fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
         async move {
             let mut stdin = stdin;
             while let Some(mut message) = outgoing.next().await {
+                queued.fetch_sub(1, Ordering::Relaxed);
                 message.push('\n');
                 if let Err(error) = stdin.write_all(message.as_bytes()).await {
                     log::error!("plugins: failed to write to {plugin_name}: {error}");
@@ -495,20 +528,18 @@ fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
         .insert(name.to_string(), settings.clone());
     let data_dir = data_dir_for(name);
     std::fs::create_dir_all(&data_dir).log_err();
-    messages
-        .unbounded_send(
-            json!({
-                "type": "initialize",
-                "protocol_version": PROTOCOL_VERSION,
-                "editor": "fool",
-                "plugin_dir": plugin_dir,
-                "config_dir": paths::config_dir(),
-                "data_dir": data_dir,
-                "settings": settings,
-            })
-            .to_string(),
-        )
-        .ok();
+    messages.send(
+        json!({
+            "type": "initialize",
+            "protocol_version": PROTOCOL_VERSION,
+            "editor": "fool",
+            "plugin_dir": plugin_dir,
+            "config_dir": paths::config_dir(),
+            "data_dir": data_dir,
+            "settings": settings,
+        })
+        .to_string(),
+    );
     if let Some(plugin) = cx
         .global_mut::<PluginHost>()
         .plugins
@@ -603,10 +634,15 @@ fn run_command(
         "args": action.args.clone().unwrap_or_default(),
         "context": context,
     });
-    messages.unbounded_send(message.to_string()).ok();
+    messages.send(message.to_string());
 }
 
 fn send_event(event: &str, editor: &Editor, cx: &mut App) {
+    // Edits and cursor moves are frequent, so skip the work when no plugin
+    // listens.
+    if !wants_event(event, cx) {
+        return;
+    }
     let Some(path) = editor_path(editor, cx) else {
         return;
     };
@@ -630,8 +666,17 @@ pub(crate) fn send_to_plugin(plugin: &str, message: String, cx: &App) {
         .find(|candidate| candidate.manifest.name == plugin)
         .and_then(|plugin| plugin.running.as_ref())
     {
-        running.messages.unbounded_send(message).ok();
+        running.messages.send(message);
     }
+}
+
+/// Whether a running plugin asked for `event` in its manifest.
+fn wants_event(event: &str, cx: &App) -> bool {
+    cx.try_global::<PluginHost>().is_some_and(|host| {
+        host.plugins.iter().any(|plugin| {
+            plugin.running.is_some() && plugin.manifest.events.iter().any(|wanted| wanted == event)
+        })
+    })
 }
 
 /// Sends an event to the running plugins that asked for it in their manifest.
@@ -644,7 +689,14 @@ fn broadcast_event(event: &str, data: Value, cx: &mut App) {
         if let Some(running) = &plugin.running
             && plugin.manifest.events.iter().any(|wanted| wanted == event)
         {
-            running.messages.unbounded_send(message.clone()).ok();
+            if running.messages.queued.load(Ordering::Relaxed) >= MAX_QUEUED_EVENTS {
+                log::warn!(
+                    "plugins: {} isn't reading its input; dropping a {event} event",
+                    plugin.manifest.name
+                );
+                continue;
+            }
+            running.messages.send(message.clone());
         }
     }
 }

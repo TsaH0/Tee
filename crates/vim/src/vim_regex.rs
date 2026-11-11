@@ -676,7 +676,9 @@ mod test {
     use super::*;
 
     fn translated(pattern: &str) -> String {
-        translate_pattern(pattern).expect("pattern should translate").pattern
+        translate_pattern(pattern)
+            .expect("pattern should translate")
+            .pattern
     }
 
     fn replace_all(pattern: &str, replacement: &str, text: &str) -> String {
@@ -705,7 +707,7 @@ mod test {
         assert_eq!(translated(r"*a"), r"\*a");
         assert_eq!(translated(r"a^b$"), r"a\^b$");
         assert_eq!(translated(r"a$b"), r"a\$b");
-        assert_eq!(translated(r"foo\=") , "foo?");
+        assert_eq!(translated(r"foo\="), "foo?");
         assert_eq!(translated(r"\%(a\)"), "(?:a)");
     }
 

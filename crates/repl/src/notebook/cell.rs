@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use editor::{Editor, EditorMode, MultiBuffer, SizingBehavior};
-use futures::{StreamExt as _, future::Shared};
+use futures::{FutureExt as _, StreamExt as _, future::Shared};
 use gpui::{
     App, Entity, EventEmitter, Focusable, Hsla, InteractiveElement, RetainAllImageCache,
     StatefulInteractiveElement, Task, prelude::*,
@@ -757,18 +757,25 @@ impl CodeCell {
 
             editor.disable_mouse_wheel_zoom();
             editor.disable_scrollbars_and_minimap(window, cx);
-            editor.set_text(source.clone(), window, cx);
             editor.set_show_gutter(false, cx);
             editor.set_use_modal_editing(true);
             editor
         });
 
-        let language_task = cx.spawn_in(window, async move |_this, cx| {
-            let language = notebook_language.await;
-            buffer.update(cx, |buffer, cx| {
-                buffer.set_language(language.clone(), cx);
-            });
-        });
+        // Usually the language is already loaded, and setting it right away
+        // keeps the cell from showing plain text first.
+        let language_task = match notebook_language.clone().now_or_never() {
+            Some(language) => {
+                buffer.update(cx, |buffer, cx| buffer.set_language(language, cx));
+                Task::ready(())
+            }
+            None => cx.spawn_in(window, async move |_this, cx| {
+                let language = notebook_language.await;
+                buffer.update(cx, |buffer, cx| {
+                    buffer.set_language(language.clone(), cx);
+                });
+            }),
+        };
 
         let (execution_count, outputs) = cell_source.into_outputs();
 
@@ -1373,7 +1380,6 @@ mod tests {
     use super::*;
 
     use collections::HashSet;
-    use futures::FutureExt as _;
     use gpui::TestAppContext;
     use indoc::indoc;
     use language::LanguageConfig;
