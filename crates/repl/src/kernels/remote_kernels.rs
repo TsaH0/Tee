@@ -13,7 +13,7 @@ use super::{KernelSession, RunningKernel};
 use anyhow::Result;
 use jupyter_websocket_client::{
     JupyterWebSocket, JupyterWebSocketReader, JupyterWebSocketWriter, KernelLaunchRequest,
-    KernelSpecsResponse, ProtocolMode, RemoteServer, binary_protocol::KERNEL_WEBSOCKET_PROTOCOL,
+    KernelSpecsResponse, ProtocolMode, RemoteServer,
 };
 use std::{fmt::Debug, sync::Arc};
 
@@ -151,32 +151,18 @@ pub async fn connect_to_kernel(
             std::env::consts::ARCH
         ))?,
     );
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_static(KERNEL_WEBSOCKET_PROTOCOL),
-    );
     // The connector carries the platform's root certificates, which `wss://`
     // servers such as tunnelled Colab runtimes need.
-    let (ws_stream, response) = connect_async_with_tls_connector(
+    let (ws_stream, _response) = connect_async_with_tls_connector(
         request,
         Some(Arc::new(http_client_tls::tls_config()).into()),
     )
     .await?;
-    // Servers that don't know the binary protocol answer without a
-    // subprotocol and speak JSON.
-    let protocol_mode = if response
-        .headers()
-        .get("Sec-WebSocket-Protocol")
-        .is_some_and(|protocol| protocol == KERNEL_WEBSOCKET_PROTOCOL)
-    {
-        ProtocolMode::BinaryV1
-    } else {
-        ProtocolMode::Json
-    };
-    log::info!("remote kernel {kernel_id}: websocket protocol {protocol_mode:?}");
+    // Not the binary v1 protocol: the websocket library rejects servers that
+    // don't accept an offered subprotocol, and Colab's proxy doesn't.
     Ok(JupyterWebSocket {
         inner: ws_stream,
-        protocol_mode,
+        protocol_mode: ProtocolMode::Json,
     })
 }
 
@@ -747,6 +733,43 @@ mod test {
     /// Runs code on a real Jupyter server the way a notebook connected to a
     /// remote runtime does: list kernels, launch one, connect to its
     /// websocket and execute a request.
+    /// Colab's proxy answers the websocket handshake without a subprotocol.
+    #[test]
+    fn test_connects_to_servers_without_a_subprotocol() -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await?;
+                let mut socket = async_tungstenite::tokio::accept_async(stream).await?;
+                let frame = socket
+                    .next()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("the client sent nothing"))??;
+                anyhow::Ok(frame.into_text()?.to_string())
+            });
+
+            let remote_server = RemoteServer {
+                base_url: format!("http://{address}"),
+                token: "token".to_string(),
+            };
+            let socket = connect_to_kernel(&remote_server, &[], "k1", "client").await?;
+            let (mut writer, _reader) = socket.split();
+            writer
+                .send(outgoing(
+                    jupyter_protocol::KernelInfoRequest {}.into(),
+                    "client",
+                ))
+                .await?;
+
+            let sent: serde_json::Value = serde_json::from_str(&server.await??)?;
+            assert_eq!(sent["channel"], "shell");
+            assert_eq!(sent["header"]["session"], "client");
+            anyhow::Ok(())
+        })
+    }
+
     #[test]
     fn test_remote_kernel_end_to_end() -> Result<()> {
         let token = "fool-test-token";

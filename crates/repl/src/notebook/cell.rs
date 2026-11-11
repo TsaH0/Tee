@@ -481,7 +481,8 @@ impl MarkdownCell {
             editor
         });
 
-        let markdown = cx.new(|cx| Markdown::new(source.clone().into(), None, None, cx));
+        let markdown =
+            cx.new(|cx| Markdown::new(source.clone().into(), Some(languages.clone()), None, cx));
 
         let editor_subscription =
             cx.subscribe(&editor, move |this, _editor, event, cx| match event {
