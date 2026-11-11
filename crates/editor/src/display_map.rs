@@ -190,6 +190,7 @@ pub enum HighlightKey {
     SelectedTextHighlight,
     SyntaxTreeView(usize),
     VimExchange,
+    VimFlashJump,
     VimSubstitutePreview,
     /// Text a plugin decorated, by namespace and style.
     Plugin { namespace: u32, style: u32 },

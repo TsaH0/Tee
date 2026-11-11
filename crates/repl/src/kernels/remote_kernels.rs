@@ -224,6 +224,11 @@ impl RemoteRunningKernel {
                 working_directory.to_str().unwrap_or_default(),
             )
             .await?;
+            log::info!(
+                "started remote kernel {kernel_id} ({}) on {}",
+                kernelspec.name,
+                remote_server.base_url
+            );
 
             // Tokio's networking only works inside its runtime, which GPUI's
             // executors aren't.
@@ -237,6 +242,7 @@ impl RemoteRunningKernel {
                 async move { connect_to_kernel(&remote_server, &headers, &kernel_id).await }
             })
             .await?;
+            log::info!("connected to remote kernel {kernel_id}");
             let (mut w, mut r): (JupyterWebSocketWriter, JupyterWebSocketReader) =
                 kernel_socket.split();
 
@@ -244,9 +250,16 @@ impl RemoteRunningKernel {
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
 
             let routing_task = cx.background_spawn({
+                let kernel_id = kernel_id.clone();
                 async move {
                     while let Some(message) = request_rx.next().await {
-                        w.send(message).await.ok();
+                        let message_type = message.header.msg_type.clone();
+                        log::debug!("remote kernel {kernel_id}: sending {message_type}");
+                        if let Err(error) = w.send(message).await {
+                            log::error!(
+                                "remote kernel {kernel_id}: can't send {message_type}: {error:#}"
+                            );
+                        }
                     }
                     Ok(())
                 }
@@ -255,10 +268,20 @@ impl RemoteRunningKernel {
             let receiving_task = cx.spawn({
                 let session = session.clone();
 
+                let kernel_id = kernel_id.clone();
                 async move |cx| {
+                    let mut received = 0usize;
                     while let Some(message) = r.next().await {
                         match message {
                             Ok(message) => {
+                                received += 1;
+                                // The first few show whether the kernel answers at all.
+                                if received <= 5 {
+                                    log::info!(
+                                        "remote kernel {kernel_id}: received {}",
+                                        message.header.msg_type
+                                    );
+                                }
                                 session
                                     .update_in(cx, |session, window, cx| {
                                         session.route(&message, window, cx);
@@ -270,6 +293,9 @@ impl RemoteRunningKernel {
                             }
                         }
                     }
+                    log::info!(
+                        "remote kernel {kernel_id}: connection closed after {received} messages"
+                    );
                     Ok(())
                 }
             });

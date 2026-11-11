@@ -1,0 +1,16 @@
+[
+  {
+    // In normal and visual modes of Vim and Helix. Adding a match selects it,
+    // which turns Vim's normal mode into visual mode, so the keys work there too.
+    "context": "Editor && (vim_mode == normal || vim_mode == visual || vim_mode == helix_normal || vim_mode == helix_select) && !menu",
+    "bindings": {
+      "space m n": ["plugins::RunCommand", { "plugin": "multicursor", "command": "add_next" }],
+      "space m p": ["plugins::RunCommand", { "plugin": "multicursor", "command": "add_previous" }],
+      "space m s": ["plugins::RunCommand", { "plugin": "multicursor", "command": "skip" }],
+      "space m a": ["plugins::RunCommand", { "plugin": "multicursor", "command": "all" }],
+      "space m j": ["plugins::RunCommand", { "plugin": "multicursor", "command": "add_below" }],
+      "space m k": ["plugins::RunCommand", { "plugin": "multicursor", "command": "add_above" }],
+      "space m c": ["plugins::RunCommand", { "plugin": "multicursor", "command": "clear" }]
+    }
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "name": "multicursor",
+  "description": "Multiple cursors: add one at the next match, skip, select every match, add above or below",
+  "run": ["python3", "multicursor.py"],
+  "keymap": "keymap.json",
+  "commands": [
+    { "name": "add_next", "description": "Add a cursor at the next match of the word or selection", "wants_text": true },
+    { "name": "add_previous", "description": "Add a cursor at the previous match", "wants_text": true },
+    { "name": "skip", "description": "Move the last cursor to the next match instead", "wants_text": true },
+    { "name": "all", "description": "Select every match of the word or selection", "vim": "MultiAll", "wants_text": true },
+    { "name": "add_below", "description": "Add a cursor on the line below", "wants_text": true },
+    { "name": "add_above", "description": "Add a cursor on the line above", "wants_text": true },
+    { "name": "clear", "description": "Remove every cursor but one", "vim": "MultiClear", "wants_text": true }
+  ]
+}
