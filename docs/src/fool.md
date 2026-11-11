@@ -200,8 +200,30 @@ Emacs Lisp.
 A plugin's `keymap` file (named in `plugin.json`) loads with it. Your own
 `keymap.json` loads after plugins, so it can still override any plugin binding.
 
-A complete example is in `docs/plugins/hello`. Copy it to
-`~/.config/zed/plugins/hello` to try it.
+Example plugins are in `docs/plugins`: `hello`, `ki-mode` and `multicursor`.
+Install one with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-fool-plugin.sh | sh -s multicursor
+```
+
+`docs/plugins/AGENTS.md` explains how to write plugins, for people and for
+coding agents, including the traps to avoid.
+
+### Multiple cursors
+
+The `multicursor` plugin adds cursors in Vim and Helix normal and visual
+modes:
+
+| Keys | Does |
+|------|------|
+| `space m n` / `space m p` | Add a cursor at the next / previous match of the word under the cursor or the selection (the first press selects the word) |
+| `space m s` | Skip: move the last cursor to the next match instead |
+| `space m a` | Select every match |
+| `space m j` / `space m k` | Add a cursor on the line below / above |
+| `space m c` | Remove every cursor but the first |
+
+Then edit as usual: `c`, `d`, `i`, `a` and the rest act on every cursor.
 
 ## Built-in Vim and Helix plugins
 
@@ -219,6 +241,13 @@ These are configured under `vim.plugins` in `settings.json`:
 }
 ```
 
+- **flash jump** (`enter` in normal and visual modes): as in flash.nvim, type
+  a few characters and every match on screen is highlighted and labeled.
+  Typing more narrows the matches, typing a label jumps to its match, `enter`
+  jumps to the nearest one, `backspace` deletes a character and `escape`
+  cancels. Labels skip letters that would continue a match, so you can always
+  keep typing. An uppercase letter makes the search case sensitive, and the
+  labels are `flash_find`'s.
 - **flash_find**: after `f`, `F`, `t` or `T` jumps to a character, the other
   visible occurrences of it get a label. Typing a label jumps there, the same as
   `{count}f{char}` would, so it works in Vim normal and visual mode and in
@@ -253,8 +282,9 @@ and `\ze`, the `\@=`, `\@!`, `\@<=` and `\@<!` assertions, back-references, and
 Case conversion in replacements (`\u`, `\U`, `\l`, `\L`) and `\=` expressions
 aren't supported.
 
-`space m` (or `:marks`) opens a searchable list of marks: type a mark's name
-or part of its line, and press `enter` to jump there.
+`space m` (or `:marks`, or `space m m`, which doesn't wait for the other
+`space m` keys) opens a searchable list of marks: type a mark's name or part of
+its line, and press `enter` to jump there.
 
 `:!command` runs a command in the terminal panel. Press `escape` or `ctrl-c` in
 the editor afterwards to close it again.

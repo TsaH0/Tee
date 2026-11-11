@@ -1360,7 +1360,7 @@ for message in messages():
         }
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugins");
         let unit_tests = std::process::Command::new("python3")
-            .args(["-m", "unittest", "test_ki_mode"])
+            .args(["-B", "-m", "unittest", "test_ki_mode"])
             .current_dir(examples.join("ki-mode"))
             .output()
             .expect("python3 should run");
@@ -1399,14 +1399,17 @@ for message in messages():
                 .map(|plugin| plugin.manifest.name.as_str())
                 .collect::<Vec<_>>();
             assert!(
-                names.contains(&"ki-mode") && names.contains(&"hello"),
+                names.contains(&"ki-mode")
+                    && names.contains(&"hello")
+                    && names.contains(&"multicursor"),
                 "{names:?}"
             );
             let ki_bindings = plugin_key_bindings(cx)
                 .into_iter()
                 .filter(|binding| binding.action().name() == "plugins::RunCommand")
                 .count();
-            assert_eq!(ki_bindings, 11, "every Ki mode binding should load");
+            // Ki mode's 11 and the multicursor plugin's 7.
+            assert_eq!(ki_bindings, 18, "every example binding should load");
         });
 
         let editor = workspace
@@ -1537,6 +1540,119 @@ for message in messages():
             "leaving Ki mode",
         )
         .await;
+    }
+
+    /// The example multicursor plugin in `docs/plugins/multicursor` adds,
+    /// skips and clears cursors.
+    #[gpui::test]
+    async fn test_example_multicursor_plugin(cx: &mut gpui::TestAppContext) {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 isn't installed");
+            return;
+        }
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugins");
+        let unit_tests = std::process::Command::new("python3")
+            .args(["-B", "-m", "unittest", "test_multicursor"])
+            .current_dir(examples.join("multicursor"))
+            .output()
+            .expect("python3 should run");
+        assert!(
+            unit_tests.status.success(),
+            "the multicursor plugin's tests failed: {}",
+            String::from_utf8_lossy(&unit_tests.stderr)
+        );
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            json!({ "a.txt": "foo bar foo\nfoobar foo\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the workspace");
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| init_with_dir(examples.clone(), cx));
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(util::path!("/project/a.txt")),
+                    OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the file should open")
+            .downcast::<Editor>()
+            .expect("the file should open in an editor");
+
+        let run = |command: &str, cx: &mut gpui::VisualTestContext| {
+            let action = RunCommand {
+                plugin: "multicursor".into(),
+                command: command.into(),
+                args: None,
+            };
+            workspace.update_in(cx, |workspace, window, cx| {
+                run_command(workspace, &action, window, cx)
+            });
+        };
+        let selections = |cx: &mut gpui::VisualTestContext| {
+            editor.update(cx, |editor, cx| {
+                let display_snapshot = editor.display_snapshot(cx);
+                let text = editor.buffer().read(cx).snapshot(cx);
+                editor
+                    .selections
+                    .all::<language::Point>(&display_snapshot)
+                    .into_iter()
+                    .map(|selection| {
+                        let start = text.point_to_offset(selection.start).0;
+                        let end = text.point_to_offset(selection.end).0;
+                        (start, end)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let wait_for = async |expected: Vec<(usize, usize)>, cx: &mut gpui::VisualTestContext| {
+            let started = std::time::Instant::now();
+            while selections(cx) != expected {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(60),
+                    "expected {expected:?}, the selections are {:?}",
+                    selections(cx)
+                );
+                sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+
+        run("add_next", cx);
+        wait_for(vec![(0, 3)], cx).await;
+        run("add_next", cx);
+        wait_for(vec![(0, 3), (8, 11)], cx).await;
+        run("add_next", cx);
+        wait_for(vec![(0, 3), (8, 11), (19, 22)], cx).await;
+        run("clear", cx);
+        wait_for(vec![(0, 0)], cx).await;
+        run("all", cx);
+        wait_for(vec![(0, 3), (8, 11), (19, 22)], cx).await;
+        run("clear", cx);
+        wait_for(vec![(0, 0)], cx).await;
+        run("add_below", cx);
+        wait_for(vec![(0, 0), (12, 12)], cx).await;
     }
 
     const EMACS_PROBE: &str = r##"

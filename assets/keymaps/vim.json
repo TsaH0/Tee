@@ -397,6 +397,8 @@
       "escape": "editor::Cancel",
       "space e": "project_panel::ToggleFocus",
       "space m": "vim::ToggleMarksView",
+      // Without waiting for other `space m` keys, such as a plugin's.
+      "space m m": "vim::ToggleMarksView",
       "shift-d": "vim::DeleteToEndOfLine",
       "shift-j": "vim::JoinLines",
       "shift-y": "vim::YankLine",
@@ -1510,6 +1512,13 @@
     "bindings": {
       "escape": "vim::CloseShellOutput",
       "ctrl-c": "vim::CloseShellOutput",
+    },
+  },
+  {
+    // A flash.nvim-style jump: type to label matches on screen, then a label.
+    "context": "Editor && (vim_mode == normal || vim_mode == visual || vim_mode == helix_normal || vim_mode == helix_select) && !menu",
+    "bindings": {
+      "enter": "vim::FlashJump",
     },
   },
 ]

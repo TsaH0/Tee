@@ -1006,6 +1006,7 @@ impl Vim {
             normal::register(editor, cx);
             insert::register(editor, cx);
             helix::register(editor, cx);
+            plugins::register(editor, cx);
             motion::register(editor, cx);
             command::register(editor, cx);
             replace::register(editor, cx);

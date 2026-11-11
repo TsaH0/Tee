@@ -586,7 +586,15 @@ async fn refresh_runtimes(cx: &mut AsyncApp) -> Result<()> {
                 None
             }
         })
-        .collect();
+        .collect::<Vec<ColabRuntime>>();
+    log::info!(
+        "Colab runtimes: {}",
+        runtimes
+            .iter()
+            .map(|runtime: &ColabRuntime| format!("{} at {}", runtime.label, runtime.url))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     cx.update(|cx| set_runtimes(runtimes, cx));
     Ok(())
 }

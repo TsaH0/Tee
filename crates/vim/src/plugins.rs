@@ -66,6 +66,17 @@ pub(crate) trait VimPlugin: 'static {
     ) {
     }
 
+    /// Called for `vim::FlashJump`. Return true if the plugin started a
+    /// jump.
+    fn flash_jump_requested(
+        &mut self,
+        _vim: &mut Vim,
+        _window: &mut Window,
+        _cx: &mut Context<Vim>,
+    ) -> bool {
+        false
+    }
+
     /// Called when the editor gains or loses focus.
     fn focus_changed(
         &mut self,
@@ -78,6 +89,7 @@ pub(crate) trait VimPlugin: 'static {
 }
 
 const BUILTIN_PLUGINS: &[fn() -> Box<dyn VimPlugin>] = &[
+    || Box::new(FlashJumpPlugin::default()),
     || Box::new(FlashFind::default()),
     || Box::new(CompletionDismiss),
     || Box::new(SubstitutePreview::default()),
@@ -145,6 +157,22 @@ impl Settings for VimPluginSettings {
             substitute_preview_enabled: substitute_preview.enabled.unwrap_or(true),
         }
     }
+}
+
+gpui::actions!(
+    vim,
+    [
+        /// Jumps like flash.nvim: type some characters, and labels appear on
+        /// their matches on screen. Typing more narrows them, and typing a
+        /// label jumps there.
+        FlashJump,
+    ]
+);
+
+pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
+    Vim::action(editor, cx, |vim, _: &FlashJump, window, cx| {
+        vim.run_plugins(|plugin, vim| plugin.flash_jump_requested(vim, window, cx));
+    });
 }
 
 impl Vim {
@@ -532,6 +560,293 @@ impl VimPlugin for FlashFind {
     }
 }
 
+/// A flash.nvim-style jump: while it's active, typed characters build a
+/// search whose matches on screen get labels, and typing a label jumps to
+/// its match. Labels skip characters that would continue a match, so typing
+/// more keeps narrowing the search.
+#[derive(Default)]
+struct FlashJumpPlugin {
+    active: Option<ActiveFlashJump>,
+}
+
+struct ActiveFlashJump {
+    pattern: String,
+    /// Each label and the start of its match, nearest to the cursor first.
+    targets: Vec<(char, Anchor)>,
+}
+
+enum FlashJumpOverlay {}
+
+const FLASH_JUMP_OVERLAY_KEY: NavigationOverlayKey =
+    NavigationOverlayKey::unique::<FlashJumpOverlay>();
+
+impl FlashJumpPlugin {
+    fn finish(&mut self, vim: &mut Vim, cx: &mut Context<Vim>) {
+        self.active = None;
+        vim.status_label = None;
+        vim.update_editor(cx, |_, editor, cx| {
+            editor.clear_navigation_overlays(FLASH_JUMP_OVERLAY_KEY, cx);
+            editor.clear_background_highlights(editor::HighlightKey::VimFlashJump, cx);
+        });
+        cx.notify();
+    }
+
+    /// Finds the pattern's matches on screen and labels them.
+    fn update_matches(&mut self, vim: &mut Vim, window: &mut Window, cx: &mut Context<Vim>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        vim.status_label = Some(format!("flash: {}", active.pattern).into());
+        let settings = VimPluginSettings::get_global(cx);
+        let labels = settings.flash_find_labels.clone();
+        let label_color = cx.theme().colors().vim_helix_jump_label_foreground;
+        let pattern = active.pattern.clone();
+        // Like smartcase: an uppercase letter makes the search case sensitive.
+        let case_sensitive = pattern.chars().any(char::is_uppercase);
+
+        let targets = vim.update_editor(cx, |_, editor, cx| {
+            editor.clear_navigation_overlays(FLASH_JUMP_OVERLAY_KEY, cx);
+            editor.clear_background_highlights(editor::HighlightKey::VimFlashJump, cx);
+            if pattern.is_empty() {
+                return Vec::new();
+            }
+            let snapshot = editor.snapshot(window, cx);
+            let display_snapshot = &snapshot.display_snapshot;
+            let buffer = display_snapshot.buffer_snapshot();
+            let visible_range = Vim::visible_jump_range(editor, &snapshot, display_snapshot, cx);
+            let visible_start = buffer.point_to_offset(visible_range.start);
+            let last_row = visible_range.end.row.min(buffer.max_point().row);
+            let visible_end = buffer.point_to_offset(Point::new(
+                last_row,
+                buffer.line_len(multi_buffer::MultiBufferRow(last_row)),
+            ));
+            let text = buffer
+                .text_for_range(visible_start..visible_end)
+                .collect::<String>();
+            let cursor = editor
+                .selections
+                .newest_anchor()
+                .head()
+                .to_offset(buffer);
+
+            let fold = |character: char| {
+                if case_sensitive {
+                    character
+                } else {
+                    character.to_lowercase().next().unwrap_or(character)
+                }
+            };
+            let haystack = text.chars().map(fold).collect::<String>();
+            let needle = pattern.chars().map(fold).collect::<String>();
+            // Lowercasing can change byte lengths, so map positions back
+            // through characters rather than bytes.
+            let original_offsets = text
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(text.len()))
+                .collect::<Vec<_>>();
+            let folded_starts = haystack
+                .char_indices()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+
+            let mut matches = Vec::new();
+            let mut continuations = std::collections::HashSet::new();
+            let needle_length = needle.chars().count();
+            for (character_index, folded_start) in folded_starts.iter().enumerate() {
+                if !haystack[*folded_start..].starts_with(&needle) {
+                    continue;
+                }
+                let (Some(start), Some(end)) = (
+                    original_offsets.get(character_index),
+                    original_offsets.get(character_index + needle_length),
+                ) else {
+                    continue;
+                };
+                let start = visible_start + *start;
+                let end = visible_start + *end;
+                let next = text[end - visible_start..].chars().next();
+                if let Some(next) = next {
+                    continuations.insert(fold(next));
+                }
+                matches.push((start, end, next));
+            }
+            matches.sort_by_key(|(start, _, _)| start.0.abs_diff(cursor.0));
+
+            let mut labels = labels
+                .into_iter()
+                .filter(|label| !continuations.contains(&fold(*label)));
+            let mut targets = Vec::new();
+            let mut overlays = Vec::new();
+            let mut highlights = Vec::new();
+            for (start, end, next) in matches {
+                let range = buffer.anchor_after(start)..buffer.anchor_before(end);
+                highlights.push(range.clone());
+                let Some(label) = labels.next() else {
+                    continue;
+                };
+                // The label goes just after the match, where the next typed
+                // character would be, as in flash.nvim.
+                let covered = next.filter(|next| *next != '\n').map(|next| {
+                    buffer.anchor_after(end)..buffer.anchor_before(end + next.len_utf8())
+                });
+                overlays.push(NavigationTargetOverlay {
+                    target_range: range.clone(),
+                    label: NavigationOverlayLabel {
+                        text: label.to_string().into(),
+                        text_color: label_color,
+                        x_offset: px(0.),
+                        scale_factor: 1.,
+                    },
+                    covered_text_range: covered,
+                });
+                targets.push((label, range.start));
+            }
+            if !highlights.is_empty() {
+                editor.highlight_background(
+                    editor::HighlightKey::VimFlashJump,
+                    &highlights,
+                    |_, theme| theme.colors().search_match_background,
+                    cx,
+                );
+            }
+            if !overlays.is_empty() {
+                editor.set_navigation_overlays(FLASH_JUMP_OVERLAY_KEY, overlays, cx);
+            }
+            targets
+        });
+        if let Some(active) = self.active.as_mut() {
+            active.targets = targets.unwrap_or_default();
+        }
+        cx.notify();
+    }
+
+    fn jump(&mut self, target: Anchor, vim: &mut Vim, window: &mut Window, cx: &mut Context<Vim>) {
+        self.finish(vim, cx);
+        let extend = vim.mode.is_visual();
+        vim.update_editor(cx, |_, editor, cx| {
+            editor.change_selections(
+                editor::SelectionEffects::scroll(editor::scroll::Autoscroll::fit()),
+                window,
+                cx,
+                |selections| {
+                    selections.move_with(&mut |map, selection| {
+                        let point = editor::display_map::ToDisplayPoint::to_display_point(
+                            &target, map,
+                        );
+                        if extend {
+                            selection.set_head(point, selection.goal);
+                        } else {
+                            selection.collapse_to(point, selection.goal);
+                        }
+                    })
+                },
+            );
+        });
+    }
+}
+
+impl VimPlugin for FlashJumpPlugin {
+    fn flash_jump_requested(
+        &mut self,
+        vim: &mut Vim,
+        window: &mut Window,
+        cx: &mut Context<Vim>,
+    ) -> bool {
+        self.active = Some(ActiveFlashJump {
+            pattern: String::new(),
+            targets: Vec::new(),
+        });
+        self.update_matches(vim, window, cx);
+        true
+    }
+
+    fn intercept_keystroke(
+        &mut self,
+        vim: &mut Vim,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Vim>,
+    ) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let modifiers = keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+            self.finish(vim, cx);
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.finish(vim, cx);
+                return true;
+            }
+            "enter" => {
+                match active.targets.first().map(|(_, target)| *target) {
+                    Some(target) => self.jump(target, vim, window, cx),
+                    None => self.finish(vim, cx),
+                }
+                return true;
+            }
+            "backspace" => {
+                if active.pattern.pop().is_none() {
+                    self.finish(vim, cx);
+                } else {
+                    self.update_matches(vim, window, cx);
+                }
+                return true;
+            }
+            _ => {}
+        }
+        let typed = keystroke
+            .key_char
+            .clone()
+            .or_else(|| (keystroke.key == "space").then(|| " ".to_string()))
+            .or_else(|| {
+                let mut characters = keystroke.key.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(character), None) => Some(if modifiers.shift {
+                        character.to_uppercase().collect()
+                    } else {
+                        character.to_string()
+                    }),
+                    _ => None,
+                }
+            });
+        let Some(typed) = typed else {
+            self.finish(vim, cx);
+            return false;
+        };
+        let mut characters = typed.chars();
+        if let (Some(character), None) = (characters.next(), characters.next())
+            && !active.pattern.is_empty()
+            && let Some(target) = active
+                .targets
+                .iter()
+                .find(|(label, _)| *label == character)
+                .map(|(_, target)| *target)
+        {
+            self.jump(target, vim, window, cx);
+            return true;
+        }
+        active.pattern.push_str(&typed);
+        self.update_matches(vim, window, cx);
+        true
+    }
+
+    fn focus_changed(
+        &mut self,
+        vim: &mut Vim,
+        focused: bool,
+        _window: &mut Window,
+        cx: &mut Context<Vim>,
+    ) {
+        if !focused && self.active.is_some() {
+            self.finish(vim, cx);
+        }
+    }
+}
+
 /// Hides the completions menu when one of the configured keys is typed.
 struct CompletionDismiss;
 
@@ -719,6 +1034,49 @@ mod test {
     use indoc::indoc;
 
     use crate::{state::Mode, test::VimTestContext};
+
+    #[gpui::test]
+    async fn test_flash_jump(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // Matches are labeled nearest first, skipping letters that continue
+        // a match (`o` and `b` here).
+        cx.set_state("ˇfoo bar foobar baz fob", Mode::Normal);
+        cx.simulate_keystrokes("enter f o s");
+        cx.assert_state("foo bar ˇfoobar baz fob", Mode::Normal);
+
+        // Typing more narrows the matches, and enter takes the nearest.
+        cx.set_state("ˇfoo bar foobar baz fob", Mode::Normal);
+        cx.simulate_keystrokes("enter f o b enter");
+        cx.assert_state("foo bar foobar baz ˇfob", Mode::Normal);
+
+        // Backspace widens the search again.
+        cx.set_state("ˇfoo bar foobar baz fob", Mode::Normal);
+        cx.simulate_keystrokes("enter f o b backspace d");
+        cx.assert_state("foo bar foobar baz ˇfob", Mode::Normal);
+
+        // Escape cancels, and keys work as usual afterwards.
+        cx.set_state("ˇfoo bar", Mode::Normal);
+        cx.simulate_keystrokes("enter b a escape l");
+        cx.assert_state("fˇoo bar", Mode::Normal);
+
+        // An uppercase letter makes the search case sensitive.
+        cx.set_state("ˇxx Ab ab", Mode::Normal);
+        cx.simulate_keystrokes("enter A enter");
+        cx.assert_state("xx ˇAb ab", Mode::Normal);
+        cx.set_state("ˇxx Ab ab", Mode::Normal);
+        cx.simulate_keystrokes("enter a s");
+        cx.assert_state("xx Ab ˇab", Mode::Normal);
+    }
+
+    #[gpui::test]
+    async fn test_flash_jump_in_helix_mode(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+        cx.set_state("ˇone two three", Mode::HelixNormal);
+        cx.simulate_keystrokes("enter t h enter");
+        cx.assert_state("one two ˇthree", Mode::HelixNormal);
+    }
 
     #[gpui::test]
     async fn test_flash_find_labels(cx: &mut gpui::TestAppContext) {
