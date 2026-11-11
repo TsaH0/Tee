@@ -1312,6 +1312,9 @@ pub struct NavigationTargetOverlay {
 pub struct NavigationOverlayLabel {
     pub text: SharedString,
     pub text_color: Hsla,
+    /// A solid background behind the label, which keeps it legible over
+    /// highlighted text.
+    pub background: Option<Hsla>,
     pub x_offset: Pixels,
     pub scale_factor: f32,
 }
@@ -9938,7 +9941,10 @@ impl Editor {
         // Each distinct style needs its own highlight key.
         let mut text_styles: Vec<(HighlightStyle, Vec<Range<Anchor>>)> = Vec::new();
         for (range, style) in highlights {
-            match text_styles.iter_mut().find(|(existing, _)| *existing == style) {
+            match text_styles
+                .iter_mut()
+                .find(|(existing, _)| *existing == style)
+            {
                 Some((_, ranges)) => ranges.push(range),
                 None => text_styles.push((style, vec![range])),
             }
@@ -9968,7 +9974,10 @@ impl Editor {
                 inlay_position: inlay.position,
                 range: 0..inlay.text().len(),
             };
-            match inlay_styles.iter_mut().find(|(existing, _)| *existing == style) {
+            match inlay_styles
+                .iter_mut()
+                .find(|(existing, _)| *existing == style)
+            {
                 Some((_, highlights)) => highlights.push(highlight),
                 None => inlay_styles.push((style, vec![highlight])),
             }
@@ -10180,6 +10189,13 @@ impl Editor {
         &self,
     ) -> &HashMap<NavigationOverlayKey, Arc<[NavigationTargetOverlay]>> {
         &self.navigation_overlays
+    }
+
+    /// The overlays shown under `key`.
+    pub fn navigation_overlays(&self, key: NavigationOverlayKey) -> &[NavigationTargetOverlay] {
+        self.navigation_overlays
+            .get(&key)
+            .map_or(&[], |overlays| overlays.as_ref())
     }
 
     pub fn clear_highlights(&mut self, key: HighlightKey, cx: &mut Context<Self>) {

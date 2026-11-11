@@ -1691,6 +1691,7 @@ impl Vim {
                 label: NavigationOverlayLabel {
                     text: label_text.into(),
                     text_color: label_color,
+                    background: None,
                     x_offset: -fit.left_shift,
                     scale_factor: fit.scale_factor,
                 },

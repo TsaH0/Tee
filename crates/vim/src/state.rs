@@ -2025,7 +2025,8 @@ mod marks_view_test {
 
         cx.simulate_keystrokes("space m");
         // `space m m` exists too, so `space m` alone waits for the timeout.
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         let names = mark_names(&mut cx);
         assert!(
@@ -2049,7 +2050,8 @@ mod marks_view_test {
         cx.set_state("ˇfirst line\nsecond line", Mode::HelixNormal);
         cx.simulate_keystrokes("space m");
         // `space m m` exists too, so `space m` alone waits for the timeout.
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         cx.workspace(|workspace, _, cx| {
             assert!(
