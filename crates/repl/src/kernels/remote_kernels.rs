@@ -188,8 +188,7 @@ impl Eq for RemoteKernelSpecification {}
 pub struct RemoteRunningKernel {
     remote_server: RemoteServer,
     headers: Vec<(String, String)>,
-    _receiving_task: Task<Result<()>>,
-    _routing_task: Task<Result<()>>,
+    _connection_task: Task<Result<()>>,
     http_client: Arc<dyn HttpClient>,
     pub working_directory: std::path::PathBuf,
     pub request_tx: mpsc::Sender<JupyterMessage>,
@@ -243,59 +242,27 @@ impl RemoteRunningKernel {
             })
             .await?;
             log::info!("connected to remote kernel {kernel_id}");
-            let (mut w, mut r): (JupyterWebSocketWriter, JupyterWebSocketReader) =
-                kernel_socket.split();
+            let (request_tx, request_rx) = futures::channel::mpsc::channel::<JupyterMessage>(100);
 
-            let (request_tx, mut request_rx) =
-                futures::channel::mpsc::channel::<JupyterMessage>(100);
-
-            let routing_task = cx.background_spawn({
-                let kernel_id = kernel_id.clone();
-                async move {
-                    while let Some(message) = request_rx.next().await {
-                        let message_type = message.header.msg_type.clone();
-                        log::debug!("remote kernel {kernel_id}: sending {message_type}");
-                        if let Err(error) = w.send(message).await {
-                            log::error!(
-                                "remote kernel {kernel_id}: can't send {message_type}: {error:#}"
-                            );
-                        }
-                    }
-                    Ok(())
-                }
-            });
-
-            let receiving_task = cx.spawn({
+            let connection_task = cx.spawn({
                 let session = session.clone();
-
+                let remote_server = RemoteServer {
+                    base_url: remote_server.base_url.clone(),
+                    token: remote_server.token.clone(),
+                };
+                let headers = headers.clone();
                 let kernel_id = kernel_id.clone();
                 async move |cx| {
-                    let mut received = 0usize;
-                    while let Some(message) = r.next().await {
-                        match message {
-                            Ok(message) => {
-                                received += 1;
-                                // The first few show whether the kernel answers at all.
-                                if received <= 5 {
-                                    log::info!(
-                                        "remote kernel {kernel_id}: received {}",
-                                        message.header.msg_type
-                                    );
-                                }
-                                session
-                                    .update_in(cx, |session, window, cx| {
-                                        session.route(&message, window, cx);
-                                    })
-                                    .ok();
-                            }
-                            Err(e) => {
-                                log::error!("Error receiving message: {:?}", e);
-                            }
-                        }
-                    }
-                    log::info!(
-                        "remote kernel {kernel_id}: connection closed after {received} messages"
-                    );
+                    keep_connected(
+                        kernel_socket,
+                        remote_server,
+                        headers,
+                        kernel_id,
+                        request_rx,
+                        session,
+                        cx,
+                    )
+                    .await;
                     Ok(())
                 }
             });
@@ -303,8 +270,7 @@ impl RemoteRunningKernel {
             let stdin_tx = request_tx.clone();
 
             anyhow::Ok(Box::new(Self {
-                _routing_task: routing_task,
-                _receiving_task: receiving_task,
+                _connection_task: connection_task,
                 remote_server,
                 headers,
                 working_directory,
@@ -318,6 +284,160 @@ impl RemoteRunningKernel {
             }) as Box<dyn RunningKernel>)
         })
     }
+}
+
+/// How often an idle connection sends a `kernel_info_request`. Proxies in
+/// front of remote kernels, like Colab's, close websockets that carry
+/// nothing for about half a minute.
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
+/// Carries messages between `session` and a remote kernel's websocket:
+/// sends a `kernel_info_request` on connecting and when idle, whose replies
+/// it keeps from the session, and reconnects to the same kernel when the
+/// connection drops, resending the message that failed.
+async fn keep_connected<S: KernelSession + 'static>(
+    first_socket: JupyterWebSocket,
+    remote_server: RemoteServer,
+    headers: Vec<(String, String)>,
+    kernel_id: String,
+    mut requests: mpsc::Receiver<JupyterMessage>,
+    session: Entity<S>,
+    cx: &mut gpui::AsyncWindowContext,
+) {
+    use futures::{FutureExt as _, select_biased};
+
+    let mut socket = Some(first_socket);
+    let mut unsent: Option<JupyterMessage> = None;
+    let mut keepalive_ids = std::collections::VecDeque::<String>::new();
+    let mut failed_attempts = 0;
+    loop {
+        let current = match socket.take() {
+            Some(current) => current,
+            None => {
+                let connected = gpui_tokio::Tokio::spawn_result(cx, {
+                    let remote_server = RemoteServer {
+                        base_url: remote_server.base_url.clone(),
+                        token: remote_server.token.clone(),
+                    };
+                    let headers = headers.clone();
+                    let kernel_id = kernel_id.clone();
+                    async move { connect_to_kernel(&remote_server, &headers, &kernel_id).await }
+                })
+                .await;
+                match connected {
+                    Ok(connected) => {
+                        log::info!("reconnected to remote kernel {kernel_id}");
+                        connected
+                    }
+                    Err(error) => {
+                        failed_attempts += 1;
+                        log::error!(
+                            "remote kernel {kernel_id}: can't reconnect (attempt {failed_attempts}): {error:#}"
+                        );
+                        if failed_attempts >= MAX_RECONNECT_ATTEMPTS {
+                            session.update(cx, |session, cx| {
+                                session.kernel_errored(
+                                    format!("lost the connection to the kernel: {error:#}"),
+                                    cx,
+                                )
+                            });
+                            return;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(2u64.pow(failed_attempts)))
+                            .await;
+                        continue;
+                    }
+                }
+            }
+        };
+        failed_attempts = 0;
+        let (mut writer, mut reader): (JupyterWebSocketWriter, JupyterWebSocketReader) =
+            current.split();
+
+        let mut pending = unsent.take().into_iter().collect::<Vec<_>>();
+        pending.insert(0, keepalive_request(&mut keepalive_ids));
+        let mut connection_lost = false;
+        for message in pending {
+            if let Err(error) = writer.send(message.clone()).await {
+                log::error!(
+                    "remote kernel {kernel_id}: can't send {}: {error:#}",
+                    message.header.msg_type
+                );
+                unsent = Some(message);
+                connection_lost = true;
+                break;
+            }
+        }
+
+        let mut received = 0usize;
+        while !connection_lost {
+            let mut timer = cx.background_executor().timer(KEEPALIVE_INTERVAL).fuse();
+            select_biased! {
+                message = reader.next().fuse() => match message {
+                    Some(Ok(message)) => {
+                        received += 1;
+                        if received <= 5 {
+                            log::info!(
+                                "remote kernel {kernel_id}: received {}",
+                                message.header.msg_type
+                            );
+                        }
+                        let is_keepalive = message
+                            .parent_header
+                            .as_ref()
+                            .is_some_and(|parent| keepalive_ids.contains(&parent.msg_id));
+                        if !is_keepalive {
+                            session
+                                .update_in(cx, |session, window, cx| {
+                                    session.route(&message, window, cx);
+                                })
+                                .ok();
+                        }
+                    }
+                    Some(Err(error)) => {
+                        log::error!("remote kernel {kernel_id}: error receiving a message: {error:#}");
+                    }
+                    None => connection_lost = true,
+                },
+                request = requests.next().fuse() => match request {
+                    Some(message) => {
+                        log::debug!("remote kernel {kernel_id}: sending {}", message.header.msg_type);
+                        if let Err(error) = writer.send(message.clone()).await {
+                            log::error!(
+                                "remote kernel {kernel_id}: can't send {}: {error:#}",
+                                message.header.msg_type
+                            );
+                            unsent = Some(message);
+                            connection_lost = true;
+                        }
+                    }
+                    // The kernel was shut down or dropped.
+                    None => return,
+                },
+                _ = timer => {
+                    let message = keepalive_request(&mut keepalive_ids);
+                    if writer.send(message).await.is_err() {
+                        connection_lost = true;
+                    }
+                }
+            }
+        }
+        log::info!(
+            "remote kernel {kernel_id}: connection closed after {received} messages; reconnecting"
+        );
+    }
+}
+
+/// A `kernel_info_request` whose replies the connection keeps to itself.
+fn keepalive_request(keepalive_ids: &mut std::collections::VecDeque<String>) -> JupyterMessage {
+    let message: JupyterMessage = jupyter_protocol::KernelInfoRequest {}.into();
+    keepalive_ids.push_back(message.header.msg_id.clone());
+    if keepalive_ids.len() > 16 {
+        keepalive_ids.pop_front();
+    }
+    message
 }
 
 impl Debug for RemoteRunningKernel {

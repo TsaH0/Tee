@@ -122,6 +122,24 @@ impl Render for ModeIndicator {
             crate::state::Mode::HelixNormal => colors.vim_helix_normal_background,
             crate::state::Mode::HelixSelect => colors.vim_helix_select_background,
         };
+        // Fool shows the mode as a solid pill. Themes that color the modes
+        // keep their colors; for the rest, the pill takes the theme's accent
+        // and status colors, with the editor background as text.
+        let (bg_color, vim_mode_text) = if bg_color == system_transparent {
+            let status = theme.status();
+            let pill = match mode {
+                crate::state::Mode::Normal | crate::state::Mode::HelixNormal => colors.text_accent,
+                crate::state::Mode::Insert => status.created,
+                crate::state::Mode::Replace => status.deleted,
+                crate::state::Mode::Visual
+                | crate::state::Mode::VisualLine
+                | crate::state::Mode::VisualBlock
+                | crate::state::Mode::HelixSelect => status.modified,
+            };
+            (pill, colors.editor_background)
+        } else {
+            (bg_color, vim_mode_text)
+        };
 
         let (label, mode): (SharedString, Option<SharedString>) = if let Some(label) = status_label
         {
@@ -138,11 +156,7 @@ impl Render for ModeIndicator {
                 .pending_keys
                 .as_ref()
                 .unwrap_or(&current_operators_description);
-            let mode = if bg_color != system_transparent {
-                mode_str.into()
-            } else {
-                format!("-- {} --", mode_str).into()
-            };
+            let mode = mode_str.to_uppercase().into();
             (pending.into(), Some(mode))
         };
         h_flex()
@@ -158,21 +172,19 @@ impl Render for ModeIndicator {
             .when_some(mode, |el, mode| {
                 el.child(
                     v_flex()
-                        .when(bg_color != system_transparent, |el| el.px_2())
+                        .px_2()
                         // match with other icons at the bottom that use default buttons
                         .h(ButtonSize::Default.rems())
                         .justify_center()
-                        .rounded_sm()
+                        .rounded_full()
                         .bg(bg_color)
                         .child(
                             Label::new(mode)
                                 .size(LabelSize::Small)
-                                .weight(FontWeight::MEDIUM)
-                                .when(
-                                    bg_color != system_transparent
-                                        && vim_mode_text != system_transparent,
-                                    |el| el.color(Color::Custom(vim_mode_text)),
-                                ),
+                                .weight(FontWeight::BOLD)
+                                .when(vim_mode_text != system_transparent, |el| {
+                                    el.color(Color::Custom(vim_mode_text))
+                                }),
                         ),
                 )
             })

@@ -315,6 +315,7 @@ impl Render for TitleBar {
                                 title_bar.child(menu)
                             },
                         )
+                        .child(render_fool_brand(cx))
                         .children(self.render_restricted_mode(cx))
                         .when(render_project_items, |title_bar| {
                             title_bar
@@ -1424,4 +1425,27 @@ impl TitleBar {
             })
             .anchor(Anchor::TopRight)
     }
+}
+
+/// Fool's mark at the start of the title bar: its mask-and-star icon and name
+/// in the theme's accent color.
+fn render_fool_brand(cx: &App) -> impl IntoElement {
+    let accent = cx.theme().colors().text_accent;
+    h_flex()
+        .id("fool-brand")
+        .flex_none()
+        .gap_1()
+        .px_1p5()
+        .child(
+            Icon::new(IconName::Fool)
+                .size(IconSize::Small)
+                .color(Color::Custom(accent)),
+        )
+        .child(
+            Label::new("Fool")
+                .size(LabelSize::Small)
+                .weight(gpui::FontWeight::BOLD)
+                .color(Color::Custom(accent)),
+        )
+        .tooltip(Tooltip::text("Fool"))
 }

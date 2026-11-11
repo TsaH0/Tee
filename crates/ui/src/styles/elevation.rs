@@ -69,6 +69,13 @@ impl ElevationIndex {
                 )
                 .blur_radius(px(6.)),
                 BoxShadow::new(px(0.), px(6.), hsla(0., 0., 0., 0.04)).blur_radius(px(12.)),
+                // Fool's pickers and dialogs float higher over the editor.
+                BoxShadow::new(
+                    px(0.),
+                    px(16.),
+                    hsla(0., 0., 0., if is_light { 0.10 } else { 0.28 }),
+                )
+                .blur_radius(px(40.)),
                 BoxShadow::new(
                     px(0.),
                     px(1.),

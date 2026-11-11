@@ -780,6 +780,50 @@ pub(crate) mod test_support {
 
     pub(crate) struct JupyterServerProcess(Child);
 
+    /// A proxy in front of the server at `target` (`host:port`) that cuts the
+    /// first kernel websocket after `cut_after`, the way Colab's proxy closes
+    /// websockets that sit idle. Returns the proxy's URL.
+    pub(crate) fn start_cutting_proxy(target: String, cut_after: Duration) -> Result<String> {
+        use std::{
+            io::copy,
+            net::{Shutdown, TcpStream},
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let cut_one = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let cut_one = cut_one.clone();
+                let target = target.clone();
+                std::thread::spawn(move || -> std::io::Result<()> {
+                    let server = TcpStream::connect(&target)?;
+                    let mut request = [0u8; 4096];
+                    let read = client.peek(&mut request)?;
+                    let is_channels =
+                        String::from_utf8_lossy(&request[..read]).contains("/channels");
+                    let cut_this = is_channels && !cut_one.swap(true, Ordering::SeqCst);
+                    let (mut client_reader, mut server_writer) =
+                        (client.try_clone()?, server.try_clone()?);
+                    std::thread::spawn(move || copy(&mut client_reader, &mut server_writer));
+                    let (mut server_reader, mut client_writer) =
+                        (server.try_clone()?, client.try_clone()?);
+                    std::thread::spawn(move || copy(&mut server_reader, &mut client_writer));
+                    if cut_this {
+                        std::thread::sleep(cut_after);
+                        client.shutdown(Shutdown::Both).ok();
+                        server.shutdown(Shutdown::Both).ok();
+                    }
+                    Ok(())
+                });
+            }
+        });
+        Ok(format!("http://{address}"))
+    }
+
     impl Drop for JupyterServerProcess {
         fn drop(&mut self) {
             self.0.kill().ok();

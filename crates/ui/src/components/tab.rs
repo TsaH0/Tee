@@ -141,7 +141,9 @@ impl RenderOnce for Tab {
             }
         };
 
+        let accent = cx.theme().colors().text_accent;
         self.div
+            .relative()
             .h(Tab::container_height(cx))
             .bg(tab_bg)
             .border_color(cx.theme().colors().border)
@@ -165,6 +167,18 @@ impl RenderOnce for Tab {
                 TabPosition::Middle(Ordering::Greater) => this.border_r_1().pl_px().border_b_1(),
             })
             .cursor_pointer()
+            // Fool marks the active tab with a bar in the theme's accent color.
+            .when(self.selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(2.))
+                        .bg(accent),
+                )
+            })
             .child(
                 h_flex()
                     .group("")

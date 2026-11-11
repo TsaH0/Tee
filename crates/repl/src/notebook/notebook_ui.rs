@@ -3141,6 +3141,61 @@ mod cell_action_tests {
         }
     }
 
+    /// A remote kernel whose websocket a proxy cuts, as Colab's does to idle
+    /// ones, is reconnected, and cells run on it afterwards.
+    #[gpui::test]
+    async fn test_remote_kernel_reconnects(cx: &mut TestAppContext) {
+        let token = "fool-test-token";
+        let Some((_server, base_url)) = crate::kernels::test_support::start_jupyter_server(token)
+        else {
+            eprintln!("skipping: jupyter isn't installed (set JUPYTER_TEST_BIN)");
+            return;
+        };
+        crate::kernels::test_support::wait_for_server(&base_url)
+            .expect("the Jupyter server should start");
+        let proxy = crate::kernels::test_support::start_cutting_proxy(
+            base_url.trim_start_matches("http://").to_string(),
+            Duration::from_secs(2),
+        )
+        .expect("the proxy should start");
+        init(cx);
+        cx.executor().allow_parking();
+        let http_client: Arc<dyn http_client::HttpClient> =
+            Arc::new(reqwest_client::ReqwestClient::new());
+        cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_http_client(http_client.clone());
+        });
+        let remote_server =
+            jupyter_websocket_client::RemoteServer::from_url(&format!("{proxy}/?token={token}"))
+                .expect("the URL should parse");
+        let spec = crate::kernels::list_remote_kernelspecs(
+            "proxied".into(),
+            remote_server,
+            Vec::new(),
+            http_client,
+        )
+        .await
+        .expect("the server should list its kernels")
+        .into_iter()
+        .find(|spec| spec.kernelspec.language == "python")
+        .expect("the server should have a Python kernel");
+
+        let notebook = notebook_json(&[("code", "print(6 * 7)")]);
+        let (editor, _project, cx) =
+            open_notebook(cx, notebook, Some(KernelSpecification::JupyterServer(spec))).await;
+        let pending_kernel = editor.read_with(cx, |editor, _| match &editor.kernel {
+            Kernel::StartingKernel(task) => task.clone(),
+            _ => panic!("the kernel should be starting"),
+        });
+        pending_kernel.await;
+
+        // The proxy cuts the first connection after two seconds.
+        sleep(Duration::from_secs(4)).await;
+        editor.update_in(cx, |editor, window, cx| editor.run_cells(window, cx));
+        wait_for_stdout(&editor, 0, "42", cx).await;
+    }
+
     /// Runs a notebook on a real Jupyter server's kernel, the way a Colab
     /// runtime is used: run all, run one cell, and restart and run all.
     #[gpui::test]
