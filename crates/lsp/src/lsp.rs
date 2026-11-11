@@ -417,6 +417,15 @@ impl std::fmt::Display for ResponseError {
 
 impl std::error::Error for ResponseError {}
 
+/// A request whose method is given when it's sent.
+enum DynamicRequest {}
+
+impl request::Request for DynamicRequest {
+    type Params = Value;
+    type Result = Value;
+    const METHOD: &'static str = "";
+}
+
 pub trait LspRequestFuture<O>: Future<Output = ConnectionResult<O>> {
     fn id(&self) -> i32;
 }
@@ -1526,12 +1535,32 @@ impl LanguageServer {
         )
     }
 
+    /// Sends a request whose method is only known at runtime, such as a
+    /// server's own extension to the protocol.
+    pub fn request_by_method(
+        &self,
+        method: &str,
+        params: Value,
+        request_timeout: Duration,
+    ) -> impl LspRequestFuture<Value> + use<> {
+        Self::request_internal_with_timer::<DynamicRequest, _>(
+            &self.next_id,
+            &self.response_handlers,
+            &self.outbound_tx,
+            &self.executor,
+            Self::request_timeout_future(self.executor.clone(), request_timeout),
+            method,
+            params,
+        )
+    }
+
     fn request_internal_with_timer<T, U>(
         next_id: &AtomicI32,
         response_handlers: &Arc<Mutex<Option<HashMap<RequestId, ResponseHandler>>>>,
         outbound_tx: &async_channel::Sender<OutboundMessage>,
         executor: &BackgroundExecutor,
         timer: U,
+        method: &str,
         params: T::Params,
     ) -> impl LspRequestFuture<T::Result> + use<T, U>
     where
@@ -1543,10 +1572,11 @@ impl LanguageServer {
         let message = serde_json::to_string(&Request {
             jsonrpc: JSON_RPC_VERSION,
             id: RequestId::Int(id),
-            method: T::METHOD,
+            method,
             params,
         })
         .expect("LSP message should be serializable to JSON");
+        let method = method.to_string();
 
         let (tx, rx) = oneshot::channel();
         let handle_response = response_handlers
@@ -1603,7 +1633,6 @@ impl LanguageServer {
                 }
             });
 
-            let method = T::METHOD;
             select! {
                 response = rx.fuse() => {
                     let elapsed = started.elapsed();
@@ -1653,6 +1682,7 @@ impl LanguageServer {
             outbound_tx,
             executor,
             Self::request_timeout_future(executor.clone(), request_timeout),
+            T::METHOD,
             params,
         )
     }

@@ -27,8 +27,8 @@ use futures::{
 };
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    Action, App, AppContext as _, Context, DismissEvent, Entity, Global, Task,
-    WeakEntity, Window, actions,
+    Action, App, AppContext as _, Context, DismissEvent, Entity, Global, Task, WeakEntity, Window,
+    actions,
 };
 use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
@@ -40,11 +40,11 @@ use smol::process::{Child, Command};
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, Toggleable, prelude::*, rems};
 use util::ResultExt as _;
 use workspace::{
-    MultiWorkspace, OpenOptions, Workspace,
+    MultiWorkspace, OpenOptions, SplitDirection, Workspace,
     notifications::{NotificationId, show_app_notification},
 };
 
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 3;
 
 actions!(
     plugins,
@@ -104,16 +104,16 @@ struct Manifest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestCommand {
-    name: String,
+pub(crate) struct ManifestCommand {
+    pub name: String,
     #[serde(default)]
-    description: String,
+    pub description: String,
     /// The name of an ex command (`:Name`) for Vim and Helix modes.
     #[serde(default)]
-    vim: Option<String>,
+    pub vim: Option<String>,
     /// Whether to send the whole text of the active buffer.
     #[serde(default)]
-    wants_text: bool,
+    pub wants_text: bool,
 }
 
 struct Plugin {
@@ -141,6 +141,43 @@ struct PluginHost {
     status_items: Vec<WeakEntity<api::PluginStatusItem>>,
     /// Modes whose keystrokes go to a plugin.
     captures: HashMap<String, api::KeyCapture>,
+    /// Decoration namespaces, by plugin and name.
+    namespaces: HashMap<(String, String), u32>,
+    /// Open live pickers, by the id of the `pick` request that opened them.
+    live_picks: HashMap<String, WeakEntity<Picker<api::PickDelegate>>>,
+    /// The settings each running plugin was last sent.
+    sent_settings: HashMap<String, Value>,
+}
+
+/// The `plugins` settings, by plugin name.
+#[derive(settings::RegisterSetting, Clone, Debug, Default, PartialEq)]
+struct PluginSettings(HashMap<String, Value>);
+
+impl settings::Settings for PluginSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self(
+            content
+                .plugins
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        )
+    }
+}
+
+fn settings_for(plugin: &str, cx: &App) -> Value {
+    use settings::Settings as _;
+    PluginSettings::get_global(cx)
+        .0
+        .get(plugin)
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()))
+}
+
+/// A folder each plugin can keep its own files in.
+fn data_dir_for(plugin: &str) -> PathBuf {
+    paths::data_dir().join("plugins").join(plugin)
 }
 
 impl Global for PluginHost {}
@@ -164,7 +201,34 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
         statuses: Default::default(),
         status_items: Vec::new(),
         captures: HashMap::default(),
+        namespaces: HashMap::default(),
+        live_picks: HashMap::default(),
+        sent_settings: HashMap::default(),
     });
+    // Tells running plugins when their settings change.
+    cx.observe_global::<settings::SettingsStore>(|cx| {
+        let running = cx
+            .global::<PluginHost>()
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.running.is_some())
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect::<Vec<_>>();
+        for plugin in running {
+            let settings = settings_for(&plugin, cx);
+            let host = cx.global_mut::<PluginHost>();
+            if host.sent_settings.get(&plugin) == Some(&settings) {
+                continue;
+            }
+            host.sent_settings.insert(plugin.clone(), settings.clone());
+            send_to_plugin(
+                &plugin,
+                json!({ "type": "settings", "settings": settings }).to_string(),
+                cx,
+            );
+        }
+    })
+    .detach();
     load_plugins(cx);
     cx.intercept_keystrokes(|event, window, cx| {
         if api::capture_keystroke(&event.keystroke, window, cx) {
@@ -199,7 +263,11 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
             .register_action(|workspace, _: &OpenPluginsFolder, window, cx| {
                 let dir = cx.global::<PluginHost>().dir.clone();
                 if let Err(error) = std::fs::create_dir_all(&dir) {
-                    notify(format!("Failed to create {}: {error}", dir.display()), true, cx);
+                    notify(
+                        format!("Failed to create {}: {error}", dir.display()),
+                        true,
+                        cx,
+                    );
                     return;
                 }
                 workspace
@@ -212,22 +280,38 @@ pub fn init_with_dir(dir: PathBuf, cx: &mut App) {
     })
     .detach();
     cx.observe_new(|editor: &mut Editor, _, cx| {
-        cx.subscribe(&cx.entity(), |editor, _, event: &editor::EditorEvent, cx| {
-            let event = match event {
-                editor::EditorEvent::Saved => "saved",
-                editor::EditorEvent::Edited { .. } => "edited",
-                editor::EditorEvent::SelectionsChanged { local: true } => "selection_changed",
-                editor::EditorEvent::Focused => "focused",
-                _ => return,
-            };
-            send_event(event, editor, cx);
-        })
+        cx.subscribe(
+            &cx.entity(),
+            |editor, _, event: &editor::EditorEvent, cx| {
+                let event = match event {
+                    editor::EditorEvent::Saved => "saved",
+                    editor::EditorEvent::Edited { .. } => "edited",
+                    editor::EditorEvent::SelectionsChanged { local: true } => "selection_changed",
+                    editor::EditorEvent::Focused => "focused",
+                    _ => return,
+                };
+                send_event(event, editor, cx);
+            },
+        )
         .detach();
-        if let Some(path) = editor_path(editor, cx)
-            && cx.has_global::<PluginHost>()
-        {
-            broadcast_event("opened", json!({ "file": path }), cx);
+        if cx.has_global::<PluginHost>() {
+            send_event("opened", editor, cx);
+            cx.on_release(|editor, cx| send_event("closed", editor, cx))
+                .detach();
         }
+    })
+    .detach();
+    // Like Emacs's `post-command-hook`: every action run from a key.
+    cx.observe_keystrokes(|event, _, cx| {
+        let Some(action) = &event.action else {
+            return;
+        };
+        let os = cx.platform_info().os;
+        broadcast_event(
+            "action",
+            json!({ "action": action.name(), "key": event.keystroke.unparse(os) }),
+            cx,
+        );
     })
     .detach();
 }
@@ -237,14 +321,18 @@ pub(crate) fn notify(message: String, is_error: bool, cx: &mut App) {
     if is_error {
         log::error!("plugins: {message}");
     }
-    show_app_notification(NotificationId::unique::<PluginNotification>(), cx, move |cx| {
-        let message = message.clone();
-        cx.new(|cx| {
-            workspace::notifications::simple_message_notification::MessageNotification::new(
-                message, cx,
-            )
-        })
-    });
+    show_app_notification(
+        NotificationId::unique::<PluginNotification>(),
+        cx,
+        move |cx| {
+            let message = message.clone();
+            cx.new(|cx| {
+                workspace::notifications::simple_message_notification::MessageNotification::new(
+                    message, cx,
+                )
+            })
+        },
+    );
 }
 
 fn read_manifests(dir: &Path) -> Vec<(Manifest, PathBuf)> {
@@ -401,6 +489,12 @@ fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
         }
     });
 
+    let settings = settings_for(name, cx);
+    cx.global_mut::<PluginHost>()
+        .sent_settings
+        .insert(name.to_string(), settings.clone());
+    let data_dir = data_dir_for(name);
+    std::fs::create_dir_all(&data_dir).log_err();
     messages
         .unbounded_send(
             json!({
@@ -409,6 +503,8 @@ fn ensure_running(name: &str, cx: &mut App) -> Result<UnboundedSender<String>> {
                 "editor": "fool",
                 "plugin_dir": plugin_dir,
                 "config_dir": paths::config_dir(),
+                "data_dir": data_dir,
+                "settings": settings,
             })
             .to_string(),
         )
@@ -479,7 +575,9 @@ fn run_command(
     let mut context = workspace
         .active_item_as::<Editor>(cx)
         .map(|editor| {
-            editor.update(cx, |editor, cx| api::editor_context(editor, command.wants_text, cx))
+            editor.update(cx, |editor, cx| {
+                api::editor_context(editor, command.wants_text, cx)
+            })
         })
         .unwrap_or_else(|| json!({}));
     context["worktrees"] = Value::Array(
@@ -512,7 +610,13 @@ fn send_event(event: &str, editor: &Editor, cx: &mut App) {
     let Some(path) = editor_path(editor, cx) else {
         return;
     };
-    broadcast_event(event, json!({ "file": path }), cx);
+    let language = editor.buffer().read(cx).as_singleton().and_then(|buffer| {
+        buffer
+            .read(cx)
+            .language()
+            .map(|language| language.name().to_string())
+    });
+    broadcast_event(event, json!({ "file": path, "language": language }), cx);
 }
 
 /// Sends a message to a running plugin.
@@ -615,15 +719,29 @@ fn with_any_workspace(
     });
 }
 
+/// How a plugin's `show` buffer behaves.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct ShowOptions {
+    /// Lets the user edit the text.
+    pub editable: bool,
+    /// The mode the buffer's editor starts in, for its own key bindings.
+    pub mode: Option<String>,
+    /// Opens the buffer in a split to the "right" or "down" instead of the
+    /// active pane.
+    pub split: Option<String>,
+}
+
 pub(crate) fn show_text(
     plugin: &str,
     title: String,
     text: String,
     language: Option<String>,
+    options: ShowOptions,
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-) {
+) -> Task<Result<()>> {
     let key = (plugin.to_string(), title.clone());
     let existing = cx
         .global::<PluginHost>()
@@ -631,7 +749,7 @@ pub(crate) fn show_text(
         .get(&key)
         .and_then(|buffer| buffer.upgrade());
     if let Some(buffer) = existing {
-        set_read_only_text(&buffer, text.clone(), cx);
+        set_buffer_text(&buffer, text.clone(), options.editable, cx);
         let editor = workspace.items_of_type::<Editor>(cx).find(|editor| {
             editor
                 .read(cx)
@@ -641,16 +759,19 @@ pub(crate) fn show_text(
                 .is_some_and(|singleton| singleton == buffer)
         });
         if let Some(editor) = editor {
-            workspace.activate_item(&editor, true, false, window, cx);
-            return;
+            editor.update(cx, |editor, cx| {
+                editor.set_read_only(!options.editable);
+                if let Some(mode) = &options.mode {
+                    editor.register_addon(api::PluginModeAddon::new(Some(mode.clone())));
+                    cx.notify();
+                }
+            });
+            workspace.activate_item(&editor, true, true, window, cx);
+            return Task::ready(Ok(()));
         }
     }
-    let language = language.map(|language| {
-        workspace
-            .app_state()
-            .languages
-            .language_for_name(&language)
-    });
+    let language =
+        language.map(|language| workspace.app_state().languages.language_for_name(&language));
     cx.spawn_in(window, async move |workspace, cx| {
         let language = match language {
             Some(language) => language.await.log_err(),
@@ -664,7 +785,7 @@ pub(crate) fn show_text(
             })?
             .await?;
         workspace.update_in(cx, |workspace, window, cx| {
-            set_read_only_text(&buffer, text, cx);
+            set_buffer_text(&buffer, text, options.editable, cx);
             cx.global_mut::<PluginHost>()
                 .shown_buffers
                 .insert(key, buffer.downgrade());
@@ -676,20 +797,32 @@ pub(crate) fn show_text(
                     window,
                     cx,
                 );
-                editor.set_read_only(true);
+                editor.set_read_only(!options.editable);
+                if let Some(mode) = options.mode {
+                    editor.register_addon(api::PluginModeAddon::new(Some(mode)));
+                }
                 editor
             });
-            workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+            match options.split.as_deref() {
+                Some("right") => {
+                    workspace.split_item(SplitDirection::Right, Box::new(editor), window, cx)
+                }
+                Some("down") => {
+                    workspace.split_item(SplitDirection::Down, Box::new(editor), window, cx)
+                }
+                _ => workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx),
+            }
         })
     })
-    .detach_and_log_err(cx);
 }
 
-fn set_read_only_text(buffer: &Entity<Buffer>, text: String, cx: &mut App) {
+fn set_buffer_text(buffer: &Entity<Buffer>, text: String, editable: bool, cx: &mut App) {
     buffer.update(cx, |buffer, cx| {
         buffer.set_capability(Capability::ReadWrite, cx);
         buffer.set_text(text, cx);
-        buffer.set_capability(Capability::ReadOnly, cx);
+        if !editable {
+            buffer.set_capability(Capability::ReadOnly, cx);
+        }
     });
 }
 
@@ -850,7 +983,9 @@ impl PickerDelegate for CommandPickerDelegate {
         let action = entry.action.clone();
         cx.emit(DismissEvent);
         self.workspace
-            .update(cx, |workspace, cx| run_command(workspace, &action, window, cx))
+            .update(cx, |workspace, cx| {
+                run_command(workspace, &action, window, cx)
+            })
             .log_err();
     }
 
@@ -904,9 +1039,8 @@ mod test {
         let request: PluginRequest =
             serde_json::from_str(r#"{"type":"open","path":"/tmp/a.rs","line":3}"#)?;
         assert!(matches!(request, PluginRequest::Open { line: Some(3), .. }));
-        let request: PluginRequest = serde_json::from_str(
-            r#"{"type":"dispatch","action":"editor::SelectAll"}"#,
-        )?;
+        let request: PluginRequest =
+            serde_json::from_str(r#"{"type":"dispatch","action":"editor::SelectAll"}"#)?;
         assert!(matches!(request, PluginRequest::Dispatch { .. }));
         Ok(())
     }
@@ -1099,7 +1233,8 @@ for message in messages():
         });
         cx.simulate_keystrokes("x shift-y");
         let started = std::time::Instant::now();
-        while editor.update(cx, |editor, cx| editor.text(cx)) != "hello there\n[x][shift-y] line\n" {
+        while editor.update(cx, |editor, cx| editor.text(cx)) != "hello there\n[x][shift-y] line\n"
+        {
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(60),
                 "the plugin didn't handle the keys: {:?}",
@@ -1134,9 +1269,11 @@ for message in messages():
                         predicate.to_string().contains("fool_mode == probe")
                     })
             }));
-            assert!(bindings
-                .iter()
-                .any(|binding| binding.action().name() == "editor::SelectAll"));
+            assert!(
+                bindings
+                    .iter()
+                    .any(|binding| binding.action().name() == "editor::SelectAll")
+            );
             // The last binding of `ctrl-alt-q` now runs the plugin.
             let last = bindings_of(None, cx)
                 .into_iter()
@@ -1209,7 +1346,10 @@ for message in messages():
                 .iter()
                 .map(|plugin| plugin.manifest.name.as_str())
                 .collect::<Vec<_>>();
-            assert!(names.contains(&"ki-mode") && names.contains(&"hello"), "{names:?}");
+            assert!(
+                names.contains(&"ki-mode") && names.contains(&"hello"),
+                "{names:?}"
+            );
             let ki_bindings = plugin_key_bindings(cx)
                 .into_iter()
                 .filter(|binding| binding.action().name() == "plugins::RunCommand")
@@ -1271,7 +1411,12 @@ for message in messages():
         }
 
         run("enter", None, cx);
-        wait_until(cx, |cx| selected(cx) == "let", "Ki mode to select the first word").await;
+        wait_until(
+            cx,
+            |cx| selected(cx) == "let",
+            "Ki mode to select the first word",
+        )
+        .await;
         editor.update(cx, |editor, _| {
             let mode = editor
                 .addon::<api::PluginModeAddon>()
@@ -1281,15 +1426,22 @@ for message in messages():
         // Ki mode's keys resolve in the editor's real key context.
         let ki_key = editor.update_in(cx, |editor, window, cx| {
             let key_context = editor.key_context(window, cx);
-            assert_eq!(key_context.get("fool_mode").map(|mode| mode.as_ref()), Some("ki"));
+            assert_eq!(
+                key_context.get("fool_mode").map(|mode| mode.as_ref()),
+                Some("ki")
+            );
             let keystroke = gpui::Keystroke::parse_with_os("l", gpui::OperatingSystem::Linux)
                 .expect("a keystroke");
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
             let (bindings, _) = keymap.bindings_for_input(&[keystroke], &[key_context]);
-            bindings
-                .first()
-                .and_then(|binding| binding.action().as_any().downcast_ref::<RunCommand>().cloned())
+            bindings.first().and_then(|binding| {
+                binding
+                    .action()
+                    .as_any()
+                    .downcast_ref::<RunCommand>()
+                    .cloned()
+            })
         });
         assert_eq!(
             ki_key.map(|action| action.command).as_deref(),
@@ -1300,7 +1452,12 @@ for message in messages():
         run("next", None, cx);
         wait_until(cx, |cx| selected(cx) == "total", "the next word").await;
         run("extend_next", None, cx);
-        wait_until(cx, |cx| selected(cx) == "total =", "extending the selection").await;
+        wait_until(
+            cx,
+            |cx| selected(cx) == "total =",
+            "extending the selection",
+        )
+        .await;
         run("delete", None, cx);
         wait_until(
             cx,
@@ -1309,7 +1466,12 @@ for message in messages():
         )
         .await;
         run("unit", Some("line"), cx);
-        wait_until(cx, |cx| selected(cx) == "let  price * 2", "selecting the line").await;
+        wait_until(
+            cx,
+            |cx| selected(cx) == "let  price * 2",
+            "selecting the line",
+        )
+        .await;
         run("leave", None, cx);
         wait_until(
             cx,
@@ -1323,5 +1485,495 @@ for message in messages():
             "leaving Ki mode",
         )
         .await;
+    }
+
+    const EMACS_PROBE: &str = r##"
+import json, os, sys
+
+next_id = 0
+pending = []
+log = []
+initialize = json.loads(sys.stdin.readline())
+
+def record(entry):
+    log.append(entry)
+    with open("log.json.tmp", "w") as file:
+        json.dump(log, file)
+    os.replace("log.json.tmp", "log.json")
+
+def answer_query(message):
+    # A live picker asks for items while the plugin waits for its answer.
+    query = message["query"]
+    print(json.dumps({"type": "update_pick", "pick": message["pick"], "items": [
+        {"label": query + "-result", "description": "found"}, "other"]}), flush=True)
+
+def request(message):
+    global next_id
+    next_id += 1
+    message["id"] = next_id
+    print(json.dumps(message), flush=True)
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            raise SystemExit(0)
+        reply = json.loads(line)
+        if reply.get("type") == "response" and reply.get("id") == next_id:
+            return reply
+        if reply.get("type") == "pick_query":
+            answer_query(reply)
+        else:
+            pending.append(reply)
+
+def messages():
+    while True:
+        if pending:
+            yield pending.pop(0)
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            return
+        yield json.loads(line)
+
+record("settings " + json.dumps(initialize["settings"]))
+record("data_dir " + str(os.path.isdir(initialize["data_dir"])))
+
+def go():
+    a, b = "A_FILE", "B_FILE"
+    record("decorate " + json.dumps(request({"type": "set_decorations", "namespace": "lint",
+        "highlights": [{"start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 6},
+                        "color": "error", "background": "#ff000033", "underline": "warning",
+                        "wavy": True}],
+        "virtual_text": [{"position": {"line": 1, "column": 12}, "text": "  <- note",
+                          "color": "muted"}]})))
+    record("bad color " + str("error" in request({"type": "set_decorations", "namespace": "x",
+        "highlights": [{"start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 2},
+                        "color": "not-a-color"}]})))
+    buffers = request({"type": "get_buffers"})["result"]
+    record("buffers " + json.dumps(sorted(
+        (os.path.basename(buffer["file"] or ""), buffer["active"]) for buffer in buffers)))
+    request({"type": "edit", "file": b, "edits": [
+        {"start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 1}, "text": "edited "}]})
+    record("b text " + request({"type": "get_text", "file": b})["result"])
+    request({"type": "set_minor_mode", "name": "lint_on", "enabled": True})
+    record("bad minor mode " + str("error" in request(
+        {"type": "set_minor_mode", "name": "bad name", "enabled": True})))
+    request({"type": "register_command", "name": "late", "vim": "Late"})
+    request({"type": "bind_keys", "keymap": [
+        {"context": "Editor", "bindings": {"ctrl-alt-u": "editor::SelectAll"}}]})
+    terminal = request({"type": "run_in_terminal", "command": "true"})
+    record("terminal " + json.dumps(terminal.get("result", "error")))
+    request({"type": "show", "title": "Scratch", "text": "scratch text\n",
+             "editable": True, "mode": "scratch_mode"})
+    request({"type": "edit", "file": "Scratch", "edits": [
+        {"start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 8}, "text": "plugin"}]})
+    record("scratch " + request({"type": "get_text", "file": "Scratch"})["result"])
+    chosen = request({"type": "pick", "items": ["first"], "live": True})
+    record("picked " + json.dumps(chosen.get("result")))
+
+for message in messages():
+    kind = message.get("type")
+    if kind == "command" and message["command"] == "go":
+        go()
+    elif kind == "event":
+        record("event " + message["event"] + " " + os.path.basename(message["data"].get("file") or "")
+               + " " + str(message["data"].get("action") or message["data"].get("language")))
+    elif kind == "settings":
+        record("new settings " + json.dumps(message["settings"]))
+    elif kind == "pick_query":
+        answer_query(message)
+"##;
+
+    /// Reads the probe plugin's log.
+    fn probe_log(plugin_dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(plugin_dir.join("log.json"))
+            .ok()
+            .and_then(|log| serde_json::from_str(&log).ok())
+            .unwrap_or_default()
+    }
+
+    async fn wait_for_log(plugin_dir: &Path, entry: &str) {
+        let started = std::time::Instant::now();
+        while !probe_log(plugin_dir).iter().any(|logged| logged == entry) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "the plugin never logged {entry:?}; it logged {:?}",
+                probe_log(plugin_dir)
+            );
+            sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The Emacs-style parts of the API: decorations, other buffers, plugin
+    /// buffers with their own mode, minor modes, runtime commands, settings,
+    /// hooks and live pickers.
+    #[gpui::test]
+    async fn test_emacs_style_api(cx: &mut gpui::TestAppContext) {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 isn't installed");
+            return;
+        }
+        let plugins = tempfile::tempdir().expect("a temporary directory");
+        let plugin_dir = plugins.path().join("probe2");
+        std::fs::create_dir_all(&plugin_dir).expect("the plugin directory");
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name": "probe2", "run": ["python3", "probe.py"], "start": "startup",
+                "commands": [{"name": "go"}], "events": ["closed", "action", "opened"]}"#,
+        )
+        .expect("the manifest");
+        let a_file = util::path!("/project/a.txt");
+        let b_file = util::path!("/project/b.txt");
+        std::fs::write(
+            plugin_dir.join("probe.py"),
+            EMACS_PROBE
+                .replace("A_FILE", a_file)
+                .replace("B_FILE", b_file),
+        )
+        .expect("the plugin");
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            gpui::UpdateGlobal::update_global(cx, |store: &mut settings::SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.plugins = Some(
+                        [("probe2".to_string(), json!({ "greeting": "hi" }))]
+                            .into_iter()
+                            .collect(),
+                    );
+                });
+            });
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            json!({ "a.txt": "first line\nsecond\n", "b.txt": "bee\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the workspace");
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| init_with_dir(plugins.path().to_path_buf(), cx));
+
+        wait_for_log(&plugin_dir, r#"settings {"greeting": "hi"}"#).await;
+        wait_for_log(&plugin_dir, "data_dir True").await;
+
+        let open = |path: &'static str, cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(PathBuf::from(path), OpenOptions::default(), window, cx)
+            })
+        };
+        let b_editor = open(b_file, cx)
+            .await
+            .expect("b.txt should open")
+            .downcast::<Editor>()
+            .expect("an editor");
+        let a_editor = open(a_file, cx)
+            .await
+            .expect("a.txt should open")
+            .downcast::<Editor>()
+            .expect("an editor");
+        wait_for_log(&plugin_dir, "event opened a.txt Plain Text").await;
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            run_command(
+                workspace,
+                &RunCommand {
+                    plugin: "probe2".into(),
+                    command: "go".into(),
+                    args: None,
+                },
+                window,
+                cx,
+            )
+        });
+
+        wait_for_log(
+            &plugin_dir,
+            r#"decorate {"type": "response", "id": 1, "result": null}"#,
+        )
+        .await;
+        wait_for_log(&plugin_dir, "bad color True").await;
+        wait_for_log(
+            &plugin_dir,
+            r#"buffers [["a.txt", true], ["b.txt", false]]"#,
+        )
+        .await;
+        wait_for_log(&plugin_dir, "b text edited bee\n").await;
+        wait_for_log(&plugin_dir, "bad minor mode True").await;
+        // There is no terminal in tests, so nothing runs.
+        wait_for_log(&plugin_dir, "terminal null").await;
+        wait_for_log(&plugin_dir, "scratch plugin text\n").await;
+
+        // Decorations and minor modes are on a.txt, which stayed active.
+        let namespace = cx.update(|_, cx| {
+            cx.global::<PluginHost>()
+                .namespaces
+                .get(&("probe2".to_string(), "lint".to_string()))
+                .copied()
+                .expect("the namespace")
+        });
+        a_editor.update_in(cx, |editor, window, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let ranges = editor
+                .plugin_highlight_ranges(namespace, cx)
+                .into_iter()
+                .map(|range| {
+                    snapshot
+                        .text_for_range(range.start..range.end)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ranges, vec!["first"]);
+            assert_eq!(editor.plugin_virtual_text(namespace, cx), vec!["  <- note"]);
+            assert!(editor.key_context(window, cx).contains("lint_on"));
+        });
+        assert_eq!(
+            b_editor.update(cx, |editor, cx| editor.text(cx)),
+            "edited bee\n"
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                vim_command("Late", cx),
+                Some(("probe2".to_string(), "late".to_string()))
+            );
+        });
+
+        // The scratch buffer is editable and has the plugin's mode.
+        let scratch = workspace.update(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<Editor>(cx)
+                .find(|editor| editor.read(cx).buffer().read(cx).title(cx) == "Scratch")
+        });
+        let scratch = scratch.expect("the scratch buffer");
+        scratch.update(cx, |editor, cx| {
+            assert!(!editor.read_only(cx));
+            assert_eq!(
+                editor
+                    .addon::<api::PluginModeAddon>()
+                    .and_then(|addon| addon.mode.clone())
+                    .as_deref(),
+                Some("scratch_mode")
+            );
+        });
+
+        // A live picker shows what the plugin answers for the query.
+        let picker = {
+            let started = std::time::Instant::now();
+            loop {
+                let picker = workspace.update(cx, |workspace, cx| {
+                    workspace.active_modal::<Picker<api::PickDelegate>>(cx)
+                });
+                if let Some(picker) = picker {
+                    break picker;
+                }
+                assert!(started.elapsed() < std::time::Duration::from_secs(60));
+                sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        picker.update_in(cx, |picker, window, cx| picker.set_query("ab", window, cx));
+        let started = std::time::Instant::now();
+        while picker.update(cx, |picker, _| picker.delegate.match_count()) != 2
+            || picker.update(cx, |picker, _| {
+                picker
+                    .delegate
+                    .matches
+                    .first()
+                    .map(|found| found.string.clone())
+            }) != Some("ab-result".to_string())
+        {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60));
+            sleep(std::time::Duration::from_millis(50)).await;
+        }
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.confirm(false, window, cx)
+        });
+        wait_for_log(&plugin_dir, "picked 0").await;
+
+        // Hooks: every action run from a key, and closing an editor.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&a_editor, true, true, window, cx);
+        });
+        cx.simulate_keystrokes("ctrl-alt-u");
+        wait_for_log(&plugin_dir, "event action  editor::SelectAll").await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            let pane = workspace.active_pane().clone();
+            pane.update(cx, |pane, cx| {
+                pane.close_item_by_id(
+                    b_editor.entity_id(),
+                    workspace::SaveIntent::Skip,
+                    window,
+                    cx,
+                )
+            })
+            .detach_and_log_err(cx);
+        });
+        drop(b_editor);
+        cx.run_until_parked();
+        wait_for_log(&plugin_dir, "event closed b.txt Plain Text").await;
+
+        // Settings changes reach the plugin.
+        cx.update(|_, cx| {
+            gpui::UpdateGlobal::update_global(cx, |store: &mut settings::SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.plugins = Some(
+                        [("probe2".to_string(), json!({ "greeting": "hello" }))]
+                            .into_iter()
+                            .collect(),
+                    );
+                });
+            });
+        });
+        wait_for_log(&plugin_dir, r#"new settings {"greeting": "hello"}"#).await;
+    }
+
+    const LSP_PROBE: &str = r##"
+import json, os, sys
+
+initialize = json.loads(sys.stdin.readline())
+log = []
+
+def record(entry):
+    log.append(entry)
+    with open("log.json.tmp", "w") as file:
+        json.dump(log, file)
+    os.replace("log.json.tmp", "log.json")
+
+def request(message, id):
+    message["id"] = id
+    print(json.dumps(message), flush=True)
+    while True:
+        reply = json.loads(sys.stdin.readline())
+        if reply.get("type") == "response" and reply.get("id") == id:
+            return reply
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("type") == "command":
+        record("echo " + json.dumps(request({"type": "lsp_request", "method": "fool/echo",
+            "params": {"word": "hi"}}, 1).get("result")))
+        record("named " + str("error" in request({"type": "lsp_request", "method": "fool/echo",
+            "server": "missing"}, 2)))
+"##;
+
+    enum FoolEcho {}
+
+    impl lsp::request::Request for FoolEcho {
+        type Params = Value;
+        type Result = Value;
+        const METHOD: &'static str = "fool/echo";
+    }
+
+    /// Plugins send any request, including a server's own extensions, to
+    /// the language server of a file.
+    #[gpui::test]
+    async fn test_lsp_request(cx: &mut gpui::TestAppContext) {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 isn't installed");
+            return;
+        }
+        let plugins = tempfile::tempdir().expect("a temporary directory");
+        let plugin_dir = plugins.path().join("lsp_probe");
+        std::fs::create_dir_all(&plugin_dir).expect("the plugin directory");
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name": "lsp_probe", "run": ["python3", "probe.py"], "start": "startup",
+                "commands": [{"name": "go"}]}"#,
+        )
+        .expect("the manifest");
+        std::fs::write(plugin_dir.join("probe.py"), LSP_PROBE).expect("the plugin");
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/project"),
+            json!({ "main.rs": "fn main() {}\n" }),
+        )
+        .await;
+        let project = project::Project::test(fs, [util::path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+        language_registry.add(std::sync::Arc::new(language::Language::new(
+            language::LanguageConfig {
+                name: "Rust".into(),
+                matcher: language::LanguageMatcher {
+                    path_suffixes: vec!["rs".into()],
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            None,
+        )));
+        let mut fake_servers =
+            language_registry.register_fake_lsp("Rust", language::FakeLspAdapter::default());
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the workspace");
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| init_with_dir(plugins.path().to_path_buf(), cx));
+
+        let _buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer_with_lsp(util::path!("/project/main.rs"), cx)
+            })
+            .await
+            .expect("main.rs should open");
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(util::path!("/project/main.rs")),
+                    OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("main.rs should open in an editor");
+        let fake_server = futures::StreamExt::next(&mut fake_servers)
+            .await
+            .expect("the language server");
+        fake_server.set_request_handler::<FoolEcho, _, _>(|params, _| async move {
+            Ok(json!({ "echoed": params }))
+        });
+        // The server counts as running once it answers `initialize`.
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            run_command(
+                workspace,
+                &RunCommand {
+                    plugin: "lsp_probe".into(),
+                    command: "go".into(),
+                    args: None,
+                },
+                window,
+                cx,
+            )
+        });
+        wait_for_log(&plugin_dir, r#"echo {"echoed": {"word": "hi"}}"#).await;
+        wait_for_log(&plugin_dir, "named True").await;
     }
 }

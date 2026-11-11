@@ -3002,6 +3002,10 @@
       },
     },
   },
+  // Settings for runtime plugins, by plugin name. Each plugin receives its own
+  // object when it starts and whenever it changes, e.g.
+  // "plugins": { "ki-mode": { "default_unit": "word" } }
+  "plugins": {},
   // Which-key popup settings
   "which_key": {
     // Whether to show the which-key popup when holding down key combinations.
