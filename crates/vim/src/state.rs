@@ -166,6 +166,7 @@ pub enum Operator {
         replaced_char: Option<char>,
     },
     HelixSurroundDelete,
+    PlaceCursors,
     HelixJump {
         behaviour: HelixJumpBehaviour,
         first_char: Option<char>,
@@ -1146,6 +1147,7 @@ impl Operator {
             Operator::HelixSurroundAdd => "helix_ms",
             Operator::HelixSurroundReplace { .. } => "helix_mr",
             Operator::HelixSurroundDelete => "helix_md",
+            Operator::PlaceCursors => "zq",
         }
     }
 
@@ -1224,7 +1226,8 @@ impl Operator {
             | Operator::ToggleBlockComments
             | Operator::HelixMatch
             | Operator::HelixNext { .. }
-            | Operator::HelixPrevious { .. } => false,
+            | Operator::HelixPrevious { .. }
+            | Operator::PlaceCursors => false,
             Operator::HelixSurroundAdd
             | Operator::HelixSurroundReplace { .. }
             | Operator::HelixSurroundDelete => true,
@@ -1274,6 +1277,7 @@ impl Operator {
             | Operator::RecordRegister
             | Operator::ReplayRegister
             | Operator::HelixMatch
+            | Operator::PlaceCursors
             | Operator::HelixJump { .. } => false,
         }
     }
@@ -2025,7 +2029,8 @@ mod marks_view_test {
 
         cx.simulate_keystrokes("space m");
         // `space m m` exists too, so `space m` alone waits for the timeout.
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         let names = mark_names(&mut cx);
         assert!(
@@ -2049,7 +2054,8 @@ mod marks_view_test {
         cx.set_state("ˇfirst line\nsecond line", Mode::HelixNormal);
         cx.simulate_keystrokes("space m");
         // `space m m` exists too, so `space m` alone waits for the timeout.
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         cx.workspace(|workspace, _, cx| {
             assert!(

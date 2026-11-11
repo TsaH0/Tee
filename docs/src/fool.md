@@ -210,9 +210,11 @@ curl -fsSL https://raw.githubusercontent.com/TsaH0/Tee/main/script/install-fool-
 `docs/plugins/AGENTS.md` explains how to write plugins, for people and for
 coding agents, including the traps to avoid.
 
-### Multiple cursors
+### Multiple cursors as a plugin
 
-The `multicursor` plugin adds cursors in Vim and Helix normal and visual
+Fool has Neovim-style multiple cursors built in (see "Multiple cursors" under
+the Vim plugins below). The `multicursor` example plugin shows how a plugin
+can do the same with keys of its own, in Vim and Helix normal and visual
 modes:
 
 | Keys | Does |
@@ -248,6 +250,28 @@ These are configured under `vim.plugins` in `settings.json`:
   cancels. Labels skip letters that would continue a match, so you can always
   keep typing. An uppercase letter makes the search case sensitive, and the
   labels are `flash_find`'s.
+- **Multiple cursors**, as in Neovim 0.13 (`:h multicursor`). Every cursor
+  is a real one, so commands, operators, `.`, macros and insert mode act at
+  each, and `u` undoes them together. In normal mode, motions move only the
+  primary cursor, and the others stay where you placed them:
+
+  | Keys | Does |
+  |------|------|
+  | `Q` | Place a cursor here (or remove it): it stays when you move on. `1Q` always adds, `2Q` removes |
+  | `zq{motion}` | A cursor wherever the motion leads, to the end of the buffer: `zqw` every word, `zqj` every line |
+  | `zq*`, `zqn`, `zqgn` | A cursor at every match of the word under the cursor, or of the last search |
+  | `{Visual}zq{motion}` | The same, within the selection, as in `vipzqw` |
+  | `{Visual}Q` | A cursor on each selected line, at the cursor's column, with follow mode on |
+  | `q=` | Follow mode: motions move every cursor (`1q=` on, `2q=` off) |
+  | `]C` / `[C` | Move to the next / previous cursor (`]CQ` removes cursors one by one) |
+  | `g CTRL-A` | Insert 1, 2, 3, … at the cursors (a count sets the first number) |
+  | `CTRL-L` or `escape` | Remove every cursor but the primary one |
+  | `gQ` | Bring back the cursors removed last |
+
+  As in Neovim 0.13, `Q` no longer replays the last macro; `@@` still does.
+  Cursors added any other way, like `ctrl-d` or `alt-click`, move together as
+  usual. Not supported: per-cursor registers and marks, and `zq` with text
+  objects.
 - **flash_find**: after `f`, `F`, `t` or `T` jumps to a character, the other
   visible occurrences of it get a label. Typing a label jumps there, the same as
   `{count}f{char}` would, so it works in Vim normal and visual mode and in

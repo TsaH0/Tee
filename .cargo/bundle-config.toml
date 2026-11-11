@@ -4,8 +4,11 @@ opt-level = "z"
 [profile.release.package]
 "*" = { opt-level = 3 }
 cli = { opt-level = 3 }
-editor = { opt-level = 3 }
-gpui = { opt-level = 3 }
+# Fool releases build with more codegen units to fit in CI time (see
+# fool_release.yml); the crates every keystroke and frame run through stay at
+# one, as in Zed's own releases, for the fastest code.
+editor = { opt-level = 3, codegen-units = 1 }
+gpui = { opt-level = 3, codegen-units = 1 }
 gpui_apple = { opt-level = 3 }
 gpui_linux = { opt-level = 3 }
 gpui_macos = { opt-level = 3 }
@@ -14,14 +17,19 @@ gpui_shared_string = { opt-level = 3 }
 gpui_util = { opt-level = 3 }
 gpui_wgpu = { opt-level = 3 }
 gpui_windows = { opt-level = 3 }
-language = { opt-level = 3 }
-multi_buffer = { opt-level = 3 }
+language = { opt-level = 3, codegen-units = 1 }
+multi_buffer = { opt-level = 3, codegen-units = 1 }
 project = { opt-level = 3 }
 remote_server = { opt-level = 3 }
-rope = { opt-level = 3 }
+rope = { opt-level = 3, codegen-units = 1 }
 scheduler = { opt-level = 3 }
-sum_tree = { opt-level = 3 }
-text = { opt-level = 3 }
+sum_tree = { opt-level = 3, codegen-units = 1 }
+text = { opt-level = 3, codegen-units = 1 }
+# Vim and Helix handle every keystroke, plugins hook into them, and pickers
+# match with fuzzy on every keystroke, so they're built for speed, not size.
+vim = { opt-level = 3, codegen-units = 1 }
+plugin_host = { opt-level = 3 }
+fuzzy = { opt-level = 3 }
 zed = { codegen-units = 1 }
 
 [target.'cfg(target_os = "linux")']

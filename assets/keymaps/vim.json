@@ -1521,4 +1521,43 @@
       "enter": "vim::FlashJump",
     },
   },
+  {
+    // Multiple cursors as in Neovim 0.13 (`:h multicursor`). `Q` places a
+    // cursor that stays when the cursor moves on, `zq{motion}` places cursors
+    // wherever the motion leads, and `q=` makes motions move every cursor.
+    "context": "Editor && vim_mode == normal && !menu",
+    "bindings": {
+      "shift-q": "vim::ToggleCursor",
+      "z q": "vim::PushPlaceCursors",
+      "g shift-q": "vim::RestoreCursors",
+    },
+  },
+  {
+    "context": "Editor && vim_mode == visual && !menu",
+    "bindings": {
+      "shift-q": "vim::CursorsOnSelectedLines",
+      "z q": "vim::PushPlaceCursors",
+    },
+  },
+  {
+    "context": "Editor && vim_mode == normal && vim_mcursor && !menu",
+    "bindings": {
+      "ctrl-l": "vim::ClearCursors",
+      "escape": "vim::ClearCursors",
+      "] shift-c": "vim::NextCursor",
+      "[ shift-c": "vim::PreviousCursor",
+      "g ctrl-a": "vim::InsertCursorCounter",
+    },
+  },
+  {
+    // `zq*`, `zqn` and `zqgn` place a cursor at every match.
+    "context": "Editor && vim_operator == zq",
+    "bindings": {
+      "*": "vim::PlaceCursorsAtWordMatches",
+      "#": "vim::PlaceCursorsAtWordMatches",
+      "n": "vim::PlaceCursorsAtSearchMatches",
+      "shift-n": "vim::PlaceCursorsAtSearchMatches",
+      "g n": "vim::PlaceCursorsAtSearchMatches",
+    },
+  },
 ]

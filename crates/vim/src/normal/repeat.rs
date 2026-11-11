@@ -1072,6 +1072,15 @@ mod test {
     #[gpui::test]
     async fn test_record_replay_dot(cx: &mut gpui::TestAppContext) {
         let mut cx = NeovimBackedTestContext::new(cx).await;
+        // Fool's `Q` places a cursor, as in Neovim 0.13; this checks the
+        // replay it was bound to.
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "shift-q",
+                crate::normal::repeat::ReplayLastRecording,
+                Some("Editor && vim_mode == normal && !menu"),
+            )])
+        });
 
         cx.set_shared_state("ˇhello world").await;
         cx.simulate_shared_keystrokes("q a r a l r b l q").await;

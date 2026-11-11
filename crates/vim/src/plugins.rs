@@ -442,7 +442,6 @@ impl VimPlugin for FlashFind {
         let ([origin_selection], Some(find)) = (origin, FindParameters::from_motion(motion)) else {
             return;
         };
-        let label_color = cx.theme().colors().vim_helix_jump_label_foreground;
 
         let flash = vim.update_editor(cx, |_, editor, cx| {
             let snapshot = editor.snapshot(window, cx);
@@ -517,12 +516,7 @@ impl VimPlugin for FlashFind {
                 let range = buffer.anchor_after(range.start)..buffer.anchor_before(range.end);
                 overlays.push(NavigationTargetOverlay {
                     target_range: range.clone(),
-                    label: NavigationOverlayLabel {
-                        text: label.to_string().into(),
-                        text_color: label_color,
-                        x_offset: px(0.),
-                        scale_factor: 1.,
-                    },
+                    label: flash_label(label, cx),
                     covered_text_range: Some(range),
                 });
                 targets.push(FlashTarget {
@@ -575,6 +569,19 @@ struct ActiveFlashJump {
     targets: Vec<(char, Anchor)>,
 }
 
+/// A label drawn like flash.nvim's: bold, in the editor's background color
+/// on a solid block of the label color, so it reads clearly over any text.
+fn flash_label(label: char, cx: &App) -> NavigationOverlayLabel {
+    let colors = cx.theme().colors();
+    NavigationOverlayLabel {
+        text: label.to_string().into(),
+        text_color: colors.editor_background,
+        background: Some(colors.vim_helix_jump_label_foreground),
+        x_offset: px(0.),
+        scale_factor: 1.,
+    }
+}
+
 enum FlashJumpOverlay {}
 
 const FLASH_JUMP_OVERLAY_KEY: NavigationOverlayKey =
@@ -599,7 +606,6 @@ impl FlashJumpPlugin {
         vim.status_label = Some(format!("flash: {}", active.pattern).into());
         let settings = VimPluginSettings::get_global(cx);
         let labels = settings.flash_find_labels.clone();
-        let label_color = cx.theme().colors().vim_helix_jump_label_foreground;
         let pattern = active.pattern.clone();
         // Like smartcase: an uppercase letter makes the search case sensitive.
         let case_sensitive = pattern.chars().any(char::is_uppercase);
@@ -623,11 +629,7 @@ impl FlashJumpPlugin {
             let text = buffer
                 .text_for_range(visible_start..visible_end)
                 .collect::<String>();
-            let cursor = editor
-                .selections
-                .newest_anchor()
-                .head()
-                .to_offset(buffer);
+            let cursor = editor.selections.newest_anchor().head().to_offset(buffer);
 
             let fold = |character: char| {
                 if case_sensitive {
@@ -687,17 +689,18 @@ impl FlashJumpPlugin {
                 };
                 // The label goes just after the match, where the next typed
                 // character would be, as in flash.nvim.
-                let covered = next.filter(|next| *next != '\n').map(|next| {
-                    buffer.anchor_after(end)..buffer.anchor_before(end + next.len_utf8())
-                });
+                // At a line's end there's nothing to cover, and the label
+                // goes in the empty space after the match.
+                let label_range = match next.filter(|next| *next != '\n') {
+                    Some(next) => {
+                        buffer.anchor_after(end)..buffer.anchor_before(end + next.len_utf8())
+                    }
+                    None => buffer.anchor_after(end)..buffer.anchor_after(end),
+                };
+                let covered = (label_range.start != label_range.end).then(|| label_range.clone());
                 overlays.push(NavigationTargetOverlay {
-                    target_range: range.clone(),
-                    label: NavigationOverlayLabel {
-                        text: label.to_string().into(),
-                        text_color: label_color,
-                        x_offset: px(0.),
-                        scale_factor: 1.,
-                    },
+                    target_range: label_range,
+                    label: flash_label(label, cx),
                     covered_text_range: covered,
                 });
                 targets.push((label, range.start));
@@ -731,9 +734,8 @@ impl FlashJumpPlugin {
                 cx,
                 |selections| {
                     selections.move_with(&mut |map, selection| {
-                        let point = editor::display_map::ToDisplayPoint::to_display_point(
-                            &target, map,
-                        );
+                        let point =
+                            editor::display_map::ToDisplayPoint::to_display_point(&target, map);
                         if extend {
                             selection.set_head(point, selection.goal);
                         } else {
@@ -1044,6 +1046,23 @@ mod test {
         cx.set_state("ˇfoo bar foobar baz fob", Mode::Normal);
         cx.simulate_keystrokes("enter f o s");
         cx.assert_state("foo bar ˇfoobar baz fob", Mode::Normal);
+
+        // Each label sits on the character it hides, so it isn't drawn over
+        // visible text, and has a solid background.
+        cx.set_state("ˇfoo bar foobar baz fob", Mode::Normal);
+        cx.simulate_keystrokes("enter f o");
+        cx.update_editor(|editor, _, _| {
+            let overlays = editor.navigation_overlays(super::FLASH_JUMP_OVERLAY_KEY);
+            assert_eq!(overlays.len(), 3);
+            for overlay in overlays.iter() {
+                assert_eq!(
+                    overlay.covered_text_range.as_ref(),
+                    Some(&overlay.target_range)
+                );
+                assert!(overlay.label.background.is_some());
+            }
+        });
+        cx.simulate_keystrokes("escape");
 
         // Typing more narrows the matches, and enter takes the nearest.
         cx.set_state("ˇfoo bar foobar baz fob", Mode::Normal);

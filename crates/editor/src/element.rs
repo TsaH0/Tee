@@ -1478,6 +1478,11 @@ impl EditorElement {
             .text_size(label_text_size)
             .text_color(label.text_color)
             .line_height(context.line_height)
+            .when_some(label.background, |label_element, background| {
+                label_element
+                    .bg(background)
+                    .font_weight(gpui::FontWeight::BOLD)
+            })
             .child(label.text.clone())
             .into_any_element();
         element.prepaint_as_root(origin, AvailableSpace::min_size(), window, cx);
@@ -11668,6 +11673,7 @@ mod tests {
             label: NavigationOverlayLabel {
                 text: SharedString::from(label_text),
                 text_color: Hsla::black(),
+                background: None,
                 x_offset: Pixels::ZERO,
                 scale_factor: 1.0,
             },

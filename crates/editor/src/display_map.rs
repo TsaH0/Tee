@@ -191,11 +191,18 @@ pub enum HighlightKey {
     SyntaxTreeView(usize),
     VimExchange,
     VimFlashJump,
+    VimMulticursor,
     VimSubstitutePreview,
     /// Text a plugin decorated, by namespace and style.
-    Plugin { namespace: u32, style: u32 },
+    Plugin {
+        namespace: u32,
+        style: u32,
+    },
     /// Virtual text a plugin added, by namespace and style.
-    PluginInlay { namespace: u32, style: u32 },
+    PluginInlay {
+        namespace: u32,
+        style: u32,
+    },
 }
 
 pub trait ToDisplayPoint {
