@@ -4244,6 +4244,14 @@ mod test {
     #[gpui::test]
     async fn test_next_line_start(cx: &mut gpui::TestAppContext) {
         let mut cx = NeovimBackedTestContext::new(cx).await;
+        // Fool binds `enter` to a flash jump; this checks the motion Vim gives it.
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                crate::motion::NextLineStart,
+                Some("Editor && (vim_mode == normal || vim_mode == visual || vim_mode == helix_normal || vim_mode == helix_select) && !menu"),
+            )])
+        });
         cx.set_shared_state("ˇone\n  two\nthree").await;
         cx.simulate_shared_keystrokes("enter").await;
         cx.shared_state().await.assert_eq("one\n  ˇtwo\nthree");

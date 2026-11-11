@@ -1244,6 +1244,14 @@ mod test {
     #[gpui::test]
     async fn test_enter(cx: &mut gpui::TestAppContext) {
         let mut cx = NeovimBackedTestContext::new(cx).await;
+        // Fool binds `enter` to a flash jump; this checks the motion Vim gives it.
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                crate::motion::NextLineStart,
+                Some("Editor && (vim_mode == normal || vim_mode == visual || vim_mode == helix_normal || vim_mode == helix_select) && !menu"),
+            )])
+        });
         cx.simulate_at_each_offset(
             "enter",
             indoc! {"
