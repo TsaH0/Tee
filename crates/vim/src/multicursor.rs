@@ -97,19 +97,7 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
         cx.notify();
     });
     Vim::action(editor, cx, |vim, _: &ToggleCursorFollow, _, cx| {
-        let count = Vim::take_count(cx);
-        vim.multicursor.follow = match count {
-            Some(1) => true,
-            Some(2) => false,
-            _ => !vim.multicursor.follow,
-        };
-        let label = if vim.multicursor.follow {
-            "follow on"
-        } else {
-            "follow off"
-        };
-        vim.status_label = Some(label.into());
-        cx.notify();
+        vim.toggle_cursor_follow(cx);
     });
     Vim::action(editor, cx, |vim, _: &PushPlaceCursors, window, cx| {
         vim.push_place_cursors(window, cx);
@@ -170,6 +158,23 @@ fn cursor(id: usize, point: Point, goal: SelectionGoal) -> Selection<Point> {
 }
 
 impl Vim {
+    /// `q=`: toggles whether motions move every cursor.
+    pub(crate) fn toggle_cursor_follow(&mut self, cx: &mut Context<Self>) {
+        let count = Vim::take_count(cx);
+        self.multicursor.follow = match count {
+            Some(1) => true,
+            Some(2) => false,
+            _ => !self.multicursor.follow,
+        };
+        let label = if self.multicursor.follow {
+            "follow on"
+        } else {
+            "follow off"
+        };
+        self.status_label = Some(label.into());
+        cx.notify();
+    }
+
     /// Whether there are cursors these commands placed, besides the primary
     /// one or at it.
     fn multicursor_active(&self, editor: &Editor) -> bool {

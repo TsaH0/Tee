@@ -2295,6 +2295,12 @@ impl Vim {
                 _ => self.clear_operator(window, cx),
             },
             Some(Operator::Mark) => self.create_mark(text, window, cx),
+            // `=` can't hold a recording, and `q=` is Neovim's multicursor
+            // follow mode.
+            Some(Operator::RecordRegister) if text.starts_with('=') => {
+                self.clear_operator(window, cx);
+                self.toggle_cursor_follow(cx);
+            }
             Some(Operator::RecordRegister) => {
                 self.record_register(text.chars().next().unwrap(), window, cx)
             }

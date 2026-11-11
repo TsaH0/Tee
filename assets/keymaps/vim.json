@@ -1529,7 +1529,6 @@
     "bindings": {
       "shift-q": "vim::ToggleCursor",
       "z q": "vim::PushPlaceCursors",
-      "q =": "vim::ToggleCursorFollow",
       "g shift-q": "vim::RestoreCursors",
     },
   },
