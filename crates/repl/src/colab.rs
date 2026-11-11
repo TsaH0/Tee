@@ -47,6 +47,11 @@ const SCOPE: &str = "https://www.googleapis.com/auth/colaboratory";
 /// Where the refresh token is kept in the system keychain.
 const CREDENTIALS_URL: &str = "https://colaboratory.googleapis.com/fool";
 const PROXY_TOKEN_HEADER: &str = "X-Colab-Runtime-Proxy-Token";
+/// Colab's runtime proxy only passes kernel traffic for the client agents it
+/// knows; this is the one Colab's VS Code extension sends, whose protocol
+/// Fool follows.
+const CLIENT_AGENT_HEADER: &str = "X-Colab-Client-Agent";
+const CLIENT_AGENT: &str = "vscode";
 /// The Colab API waits up to 180s to create a runtime.
 const WAIT_TIMEOUT: &str = "200s";
 /// How long before a runtime's proxy token expires to refresh it.
@@ -91,7 +96,10 @@ pub(crate) fn jupyter_servers(cx: &App) -> Vec<(String, RemoteServer, Vec<(Strin
                     base_url: runtime.url.clone(),
                     token: runtime.token.clone(),
                 },
-                vec![(PROXY_TOKEN_HEADER.to_string(), runtime.token.clone())],
+                vec![
+                    (PROXY_TOKEN_HEADER.to_string(), runtime.token.clone()),
+                    (CLIENT_AGENT_HEADER.to_string(), CLIENT_AGENT.to_string()),
+                ],
             )
         })
         .collect()
@@ -1038,7 +1046,10 @@ mod test {
             assert_eq!(server.token, "proxy");
             assert_eq!(
                 headers,
-                &vec![(PROXY_TOKEN_HEADER.to_string(), "proxy".to_string())]
+                &vec![
+                    (PROXY_TOKEN_HEADER.to_string(), "proxy".to_string()),
+                    (CLIENT_AGENT_HEADER.to_string(), CLIENT_AGENT.to_string()),
+                ]
             );
         });
     }
