@@ -24,11 +24,25 @@ pub struct RemoteKernelSpecification {
     pub server_name: String,
     pub url: String,
     pub token: String,
+    /// Headers every request to the server carries, such as the proxy token
+    /// of a Colab runtime.
+    pub headers: Vec<(String, String)>,
     pub kernelspec: JupyterKernelspec,
+}
+
+fn with_headers(
+    mut request: http_client::Builder,
+    headers: &[(String, String)],
+) -> http_client::Builder {
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    request
 }
 
 pub async fn launch_remote_kernel(
     remote_server: &RemoteServer,
+    headers: &[(String, String)],
     http_client: Arc<dyn HttpClient>,
     kernel_name: &str,
     _path: &str,
@@ -43,7 +57,7 @@ pub async fn launch_remote_kernel(
 
     let kernel_launch_request = serde_json::to_string(&kernel_launch_request)?;
 
-    let request = Request::builder()
+    let request = with_headers(Request::builder(), headers)
         .method("POST")
         .uri(&remote_server.api_url("/kernels"))
         .header("Authorization", format!("token {}", remote_server.token))
@@ -68,11 +82,12 @@ pub async fn launch_remote_kernel(
 pub async fn list_remote_kernelspecs(
     server_name: String,
     remote_server: RemoteServer,
+    headers: Vec<(String, String)>,
     http_client: Arc<dyn HttpClient>,
 ) -> Result<Vec<RemoteKernelSpecification>> {
     let url = remote_server.api_url("/kernelspecs");
 
-    let request = Request::builder()
+    let request = with_headers(Request::builder(), &headers)
         .method("GET")
         .uri(&url)
         .header("Authorization", format!("token {}", remote_server.token))
@@ -100,6 +115,7 @@ pub async fn list_remote_kernelspecs(
             server_name: server_name.clone(),
             url: remote_server.base_url.clone(),
             token: remote_server.token.clone(),
+            headers: headers.clone(),
             kernelspec: spec.spec,
         })
         .collect::<Vec<RemoteKernelSpecification>>();
@@ -111,10 +127,17 @@ pub async fn list_remote_kernelspecs(
 /// Opens the websocket of a kernel that runs on `remote_server`.
 pub async fn connect_to_kernel(
     remote_server: &RemoteServer,
+    headers: &[(String, String)],
     kernel_id: &str,
 ) -> Result<JupyterWebSocket> {
     let ws_url = kernel_channels_url(remote_server, kernel_id)?;
     let mut request: Request<()> = ws_url.into_client_request()?;
+    for (name, value) in headers {
+        request.headers_mut().insert(
+            http_client::http::HeaderName::from_bytes(name.as_bytes())?,
+            HeaderValue::from_str(value)?,
+        );
+    }
     request.headers_mut().insert(
         "User-Agent",
         HeaderValue::from_str(&format!(
@@ -164,6 +187,7 @@ impl Eq for RemoteKernelSpecification {}
 
 pub struct RemoteRunningKernel {
     remote_server: RemoteServer,
+    headers: Vec<(String, String)>,
     _receiving_task: Task<Result<()>>,
     _routing_task: Task<Result<()>>,
     http_client: Arc<dyn HttpClient>,
@@ -187,12 +211,14 @@ impl RemoteRunningKernel {
             base_url: kernelspec.url,
             token: kernelspec.token,
         };
+        let headers = kernelspec.headers;
 
         let http_client = cx.http_client();
 
         window.spawn(cx, async move |cx| {
             let kernel_id = launch_remote_kernel(
                 &remote_server,
+                &headers,
                 http_client.clone(),
                 &kernelspec.name,
                 working_directory.to_str().unwrap_or_default(),
@@ -207,7 +233,8 @@ impl RemoteRunningKernel {
                     token: remote_server.token.clone(),
                 };
                 let kernel_id = kernel_id.clone();
-                async move { connect_to_kernel(&remote_server, &kernel_id).await }
+                let headers = headers.clone();
+                async move { connect_to_kernel(&remote_server, &headers, &kernel_id).await }
             })
             .await?;
             let (mut w, mut r): (JupyterWebSocketWriter, JupyterWebSocketReader) =
@@ -253,6 +280,7 @@ impl RemoteRunningKernel {
                 _routing_task: routing_task,
                 _receiving_task: receiving_task,
                 remote_server,
+                headers,
                 working_directory,
                 request_tx,
                 stdin_tx,
@@ -313,10 +341,11 @@ impl RunningKernel for RemoteRunningKernel {
             .remote_server
             .api_url(&format!("/kernels/{}", self.kernel_id));
         let token = self.remote_server.token.clone();
+        let headers = self.headers.clone();
         let http_client = self.http_client.clone();
 
         window.spawn(cx, async move |_| {
-            let request = Request::builder()
+            let request = with_headers(Request::builder(), &headers)
                 .method("DELETE")
                 .uri(&url)
                 .header("Authorization", format!("token {}", token))
@@ -341,9 +370,7 @@ impl RunningKernel for RemoteRunningKernel {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use jupyter_protocol::{ExecuteRequest, JupyterMessage, JupyterMessageContent};
 
@@ -413,7 +440,8 @@ mod test {
         });
 
         let remote_server = RemoteServer::from_url(&format!("{base_url}/?token={token}"))?;
-        let specs = list_remote_kernelspecs("local".into(), remote_server, http_client).await?;
+        let specs =
+            list_remote_kernelspecs("local".into(), remote_server, Vec::new(), http_client).await?;
         let spec = specs
             .into_iter()
             .find(|spec| spec.kernelspec.language == "python")
@@ -520,7 +548,12 @@ mod test {
                     base_url: remote_server.base_url.clone(),
                     token: remote_server.token.clone(),
                 };
-                match list_remote_kernelspecs("test".into(), remote_server, http_client.clone())
+                match list_remote_kernelspecs(
+                    "test".into(),
+                    remote_server,
+                    Vec::new(),
+                    http_client.clone(),
+                )
                 .await
                 {
                     Ok(specs) => break specs,
@@ -537,8 +570,9 @@ mod test {
             assert_eq!(spec.server_name, "test");
 
             let kernel_id =
-                launch_remote_kernel(&remote_server, http_client.clone(), &spec.name, "").await?;
-            let socket = connect_to_kernel(&remote_server, &kernel_id).await?;
+                launch_remote_kernel(&remote_server, &[], http_client.clone(), &spec.name, "")
+                    .await?;
+            let socket = connect_to_kernel(&remote_server, &[], &kernel_id).await?;
             let (mut writer, mut reader) = socket.split();
 
             let request: JupyterMessage = ExecuteRequest::new("print(6 * 7)".to_string()).into();

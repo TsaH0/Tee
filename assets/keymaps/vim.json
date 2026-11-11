@@ -1407,7 +1407,9 @@
       "space n y": "notebook::ChangeCellToCode",
       "space n s": "notebook::SelectKernel",
       "space n j": "repl::ConnectToJupyterServer",
-      "space n g": "repl::ConnectToColab",
+      "space n g": "repl::NewColabRuntime",
+      "space n d": "repl::DeleteColabRuntime",
+      "space n t": "repl::ConnectToColab",
     },
   },
   {
@@ -1451,7 +1453,9 @@
       "space n y": "notebook::ChangeCellToCode",
       "space n s": "notebook::SelectKernel",
       "space n j": "repl::ConnectToJupyterServer",
-      "space n g": "repl::ConnectToColab",
+      "space n g": "repl::NewColabRuntime",
+      "space n d": "repl::DeleteColabRuntime",
+      "space n t": "repl::ConnectToColab",
     },
   },
   {

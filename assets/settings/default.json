@@ -2884,6 +2884,12 @@
     //   { "name": "Colab", "url": "https://example.trycloudflare.com/?token=abc" }
     // ]
     "servers": [],
+    // A Google OAuth client ("Desktop app") from a Google Cloud project with
+    // the Colab API enabled, for `repl: new colab runtime`.
+    // "colab": {
+    //   "client_id": "123-abc.apps.googleusercontent.com",
+    //   "client_secret": "GOCSPX-..."
+    // }
   },
   // REPL settings.
   "repl": {

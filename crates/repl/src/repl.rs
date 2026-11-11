@@ -1,3 +1,4 @@
+mod colab;
 pub mod components;
 mod jupyter_servers;
 mod jupyter_settings;
@@ -34,6 +35,7 @@ pub fn init(fs: Arc<dyn Fs>, cx: &mut App) {
     set_dispatcher(zed_dispatcher(cx));
     repl_sessions_ui::init(cx);
     jupyter_servers::init(cx);
+    colab::init(cx);
     ReplStore::init(fs, cx);
 }
 
