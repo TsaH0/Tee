@@ -156,6 +156,7 @@ pub enum IconName {
     Font,
     FontSize,
     FontWeight,
+    Fool,
     Forgejo,
     ForwardArrow,
     ForwardArrowUp,
