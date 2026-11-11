@@ -11,6 +11,7 @@ mod indent;
 mod insert;
 mod mode_indicator;
 mod motion;
+mod multicursor;
 mod normal;
 mod object;
 mod plugins;
@@ -542,6 +543,7 @@ pub(crate) struct Vim {
     last_command: Option<String>,
     running_command: Option<Task<()>>,
     plugins: Vec<Box<dyn plugins::VimPlugin>>,
+    pub(crate) multicursor: multicursor::MulticursorState,
     /// Whether `:!` showed output in a terminal that Escape should close.
     pub(crate) shell_output_open: bool,
     _subscriptions: Vec<Subscription>,
@@ -613,6 +615,7 @@ impl Vim {
             running_command: None,
 
             plugins: plugins::create_plugins(),
+            multicursor: Default::default(),
             shell_output_open: false,
 
             editor: editor.downgrade(),
@@ -1007,6 +1010,7 @@ impl Vim {
             insert::register(editor, cx);
             helix::register(editor, cx);
             plugins::register(editor, cx);
+            multicursor::register(editor, cx);
             motion::register(editor, cx);
             command::register(editor, cx);
             replace::register(editor, cx);
@@ -1167,8 +1171,11 @@ impl Vim {
                 self.blurred(window, cx);
                 self.notify_plugins_focus(false, window, cx);
             }
-            EditorEvent::SelectionsChanged { local: true } => {
-                self.local_selections_changed(window, cx);
+            EditorEvent::SelectionsChanged { local } => {
+                self.multicursor_selections_changed(cx);
+                if *local {
+                    self.local_selections_changed(window, cx);
+                }
             }
             EditorEvent::InputIgnored { text } => {
                 self.input_ignored(text.clone(), window, cx);
@@ -1525,6 +1532,9 @@ impl Vim {
 
         if self.shell_output_open {
             context.add("vim_shell_output");
+        }
+        if self.multicursor.in_session() {
+            context.add("vim_mcursor");
         }
 
         let active_operator = self.active_operator();

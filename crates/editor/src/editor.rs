@@ -9790,6 +9790,13 @@ impl Editor {
             .is_some_and(|(_, highlights)| !highlights.is_empty())
     }
 
+    /// The ranges `key` highlights in the background, in buffer order.
+    pub fn background_highlight_ranges(&self, key: HighlightKey) -> &[Range<Anchor>] {
+        self.background_highlights
+            .get(&key)
+            .map_or(&[], |(_, ranges)| ranges.as_ref())
+    }
+
     /// Returns all background highlights for a given range.
     ///
     /// The order of highlights is not deterministic, do sort the ranges if needed for the logic.

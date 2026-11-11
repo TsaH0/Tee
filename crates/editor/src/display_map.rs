@@ -191,6 +191,7 @@ pub enum HighlightKey {
     SyntaxTreeView(usize),
     VimExchange,
     VimFlashJump,
+    VimMulticursor,
     VimSubstitutePreview,
     /// Text a plugin decorated, by namespace and style.
     Plugin {

@@ -417,6 +417,7 @@ impl Vim {
                 cx,
             ),
             Some(Operator::Rewrap) => self.rewrap_motion(motion, times, forced_motion, window, cx),
+            Some(Operator::PlaceCursors) => self.place_cursors_motion(motion, times, window, cx),
             Some(Operator::Outdent) => self.indent_motion(
                 motion,
                 times,
@@ -603,6 +604,9 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.move_primary_cursor(&motion, times, window, cx) {
+            return;
+        }
         self.update_editor(cx, |vim, editor, cx| {
             let text_layout_details = editor.text_layout_details(window, cx);
 
